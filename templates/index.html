@@ -157,6 +157,7 @@
             </div>
         </div>
     </div>
+    <div id="vm-details"></div>
 </div>
 {% endblock %}
 
@@ -370,6 +371,104 @@ function restartVM(name, resourceGroup) {
         });
 }
 
+function updateVMDetails(vm) {
+    const vmName = vm.name;
+    const resourceGroup = vm.resourceGroup;
+    
+    // Show loading state
+    document.getElementById('vm-details').innerHTML = `
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Loading VM Details...</h5>
+                <div class="progress mb-3">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
+                </div>
+                <div id="basic-info">Loading basic information...</div>
+                <div id="network-info">Loading network information...</div>
+                <div id="storage-info">Loading storage information...</div>
+            </div>
+        </div>
+    `;
+    
+    // Update progress bar
+    const progressBar = document.querySelector('.progress-bar');
+    
+    // Load basic info
+    fetch(`/api/vm-basic/${resourceGroup}/${vmName}`)
+        .then(response => response.json())
+        .then(data => {
+            progressBar.style.width = '33%';
+            const basicInfo = data.vm;
+            document.getElementById('basic-info').innerHTML = `
+                <h6>Basic Information</h6>
+                <p><strong>Name:</strong> ${basicInfo.name}</p>
+                <p><strong>Resource Group:</strong> ${basicInfo.resourceGroup}</p>
+                <p><strong>Location:</strong> ${basicInfo.location}</p>
+                <p><strong>Size:</strong> ${basicInfo.vmSize}</p>
+                <p><strong>OS Type:</strong> ${basicInfo.osType}</p>
+                <p><strong>State:</strong> ${basicInfo.provisioningState}</p>
+            `;
+        })
+        .catch(error => {
+            document.getElementById('basic-info').innerHTML = `<div class="alert alert-danger">Error loading basic information: ${error}</div>`;
+        });
+    
+    // Load network info
+    fetch(`/api/vm-network/${resourceGroup}/${vmName}`)
+        .then(response => response.json())
+        .then(data => {
+            progressBar.style.width = '66%';
+            const networkHtml = data.nics.map(nic => `
+                <div class="card mb-2">
+                    <div class="card-body">
+                        <h6>${nic.name}</h6>
+                        <p><strong>Private IP:</strong> ${nic.private_ip}</p>
+                        <p><strong>Public IP:</strong> ${nic.public_ip}</p>
+                        <p><strong>Status:</strong> ${nic.status}</p>
+                    </div>
+                </div>
+            `).join('');
+            
+            document.getElementById('network-info').innerHTML = `
+                <h6>Network Information</h6>
+                ${networkHtml}
+            `;
+        })
+        .catch(error => {
+            document.getElementById('network-info').innerHTML = `<div class="alert alert-danger">Error loading network information: ${error}</div>`;
+        });
+    
+    // Load storage info
+    fetch(`/api/vm-storage/${resourceGroup}/${vmName}`)
+        .then(response => response.json())
+        .then(data => {
+            progressBar.style.width = '100%';
+            const storageHtml = data.disks.map(disk => `
+                <div class="card mb-2">
+                    <div class="card-body">
+                        <h6>${disk.name}</h6>
+                        <p><strong>Size:</strong> ${disk.size_gb} GB</p>
+                        <p><strong>Type:</strong> ${disk.type}</p>
+                        <p><strong>Role:</strong> ${disk.is_os_disk ? 'OS Disk' : 'Data Disk'}</p>
+                    </div>
+                </div>
+            `).join('');
+            
+            document.getElementById('storage-info').innerHTML = `
+                <h6>Storage Information</h6>
+                ${storageHtml}
+            `;
+            
+            // Remove progress bar after everything is loaded
+            setTimeout(() => {
+                document.querySelector('.progress').remove();
+            }, 500);
+        })
+        .catch(error => {
+            document.getElementById('storage-info').innerHTML = `<div class="alert alert-danger">Error loading storage information: ${error}</div>`;
+        });
+}
+
 $(document).ready(function() {
     // Initialize filters
     $('#applyFilters').click(function() {
@@ -416,6 +515,12 @@ $(document).ready(function() {
     // Refresh button
     $('#refreshBtn').click(function() {
         loadData();
+    });
+    
+    // VM details
+    $(document).on('click', '#instancesTable tbody tr', function() {
+        const vm = table.row(this).data();
+        updateVMDetails(vm);
     });
 });
 </script>

@@ -584,6 +584,132 @@ def refresh_data():
         })
     return jsonify(result)
 
+@app.route('/api/vm-basic/<resource_group>/<vm_name>')
+def get_vm_basic_info(resource_group, vm_name):
+    """Get basic VM information quickly"""
+    try:
+        # Try cache first
+        cached_data = load_from_cache(vm_name, resource_group)
+        if cached_data:
+            return jsonify(cached_data)
+
+        # Get basic VM info
+        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} -o json"
+        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
+        
+        if vm_result.returncode != 0:
+            return jsonify({'error': 'Failed to get VM details'}), 500
+        
+        vm_data = json.loads(vm_result.stdout)
+        
+        # Return minimal info
+        basic_info = {
+            'vm': {
+                'name': vm_data.get('name'),
+                'resourceGroup': vm_data.get('resourceGroup'),
+                'location': vm_data.get('location'),
+                'vmSize': vm_data.get('hardwareProfile', {}).get('vmSize'),
+                'osType': vm_data.get('storageProfile', {}).get('osDisk', {}).get('osType'),
+                'provisioningState': vm_data.get('provisioningState')
+            },
+            'loading': True  # Indicate that more data is coming
+        }
+        
+        return jsonify(basic_info)
+        
+    except Exception as e:
+        app.logger.error(f"Error getting basic VM info: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vm-network/<resource_group>/<vm_name>')
+def get_vm_network_info(resource_group, vm_name):
+    """Get VM network information separately"""
+    try:
+        # Check cache first
+        cached_data = load_from_cache(vm_name, resource_group)
+        if cached_data and 'nics' in cached_data:
+            return jsonify({'nics': cached_data['nics']})
+
+        # Get IP addresses
+        ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
+        ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True)
+        
+        nics = []
+        if ip_result.returncode == 0:
+            ip_data = json.loads(ip_result.stdout)
+            if ip_data and len(ip_data) > 0:
+                network = ip_data[0].get('virtualMachine', {}).get('network', {})
+                private_ips = network.get('privateIpAddresses', [])
+                public_ips = network.get('publicIpAddresses', [])
+                
+                for i, private_ip in enumerate(private_ips):
+                    public_ip = public_ips[i].get('ipAddress') if i < len(public_ips) else 'Not configured'
+                    nics.append({
+                        'name': f'NIC {i+1}',
+                        'private_ip': private_ip,
+                        'public_ip': public_ip,
+                        'status': 'Configured'
+                    })
+        
+        if not nics:
+            nics.append({
+                'name': 'Default NIC',
+                'private_ip': 'Not configured',
+                'public_ip': 'Not configured',
+                'status': 'No IP configuration'
+            })
+            
+        return jsonify({'nics': nics})
+        
+    except Exception as e:
+        app.logger.error(f"Error getting network info: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vm-storage/<resource_group>/<vm_name>')
+def get_vm_storage_info(resource_group, vm_name):
+    """Get VM storage information separately"""
+    try:
+        # Check cache first
+        cached_data = load_from_cache(vm_name, resource_group)
+        if cached_data and 'disks' in cached_data:
+            return jsonify({'disks': cached_data['disks']})
+
+        # Get VM details for storage info
+        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} -o json"
+        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
+        
+        if vm_result.returncode != 0:
+            return jsonify({'error': 'Failed to get storage details'}), 500
+            
+        vm_data = json.loads(vm_result.stdout)
+        disks = []
+        
+        # Get OS disk
+        os_disk = vm_data.get('storageProfile', {}).get('osDisk', {})
+        if os_disk:
+            disks.append({
+                'name': os_disk.get('name', 'OS Disk'),
+                'size_gb': os_disk.get('diskSizeGb'),
+                'type': os_disk.get('managedDisk', {}).get('storageAccountType'),
+                'is_os_disk': True
+            })
+        
+        # Get data disks
+        for data_disk in vm_data.get('storageProfile', {}).get('dataDisks', []):
+            disks.append({
+                'name': data_disk.get('name', 'Data Disk'),
+                'size_gb': data_disk.get('diskSizeGb'),
+                'type': data_disk.get('managedDisk', {}).get('storageAccountType'),
+                'is_os_disk': False,
+                'lun': data_disk.get('lun')
+            })
+            
+        return jsonify({'disks': disks})
+        
+    except Exception as e:
+        app.logger.error(f"Error getting storage info: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 def init_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=lambda: cache.delete_memoized(get_azure_instances),
