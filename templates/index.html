@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure Instance Dashboard</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- DataTables CSS -->
+    <link href="https://cdn.datatables.net/1.13.5/css/dataTables.bootstrap5.min.css" rel="stylesheet">
+    <link href="https://cdn.datatables.net/buttons/2.4.1/css/buttons.bootstrap5.min.css" rel="stylesheet">
+    <link href="https://cdn.datatables.net/responsive/2.4.1/css/responsive.bootstrap5.min.css" rel="stylesheet">
+    <!-- Custom CSS -->
+    <style>
+        :root {
+            --primary-color: #0078D4;
+            --secondary-color: #50E6FF;
+        }
+        
+        body {
+            background-color: #f8f9fa;
+        }
+
+        .card {
+            border-radius: 15px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .card-header {
+            background-color: white;
+            border-bottom: none;
+            border-radius: 15px 15px 0 0 !important;
+            padding: 1.5rem;
+        }
+
+        .stats-card {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            transition: transform 0.3s ease;
+            cursor: pointer;
+        }
+
+        .stats-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .stats-card.active {
+            background: linear-gradient(135deg, var(--secondary-color), var(--primary-color));
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .refresh-btn {
+            border-radius: 20px;
+            padding: 0.5rem 1.5rem;
+            transition: all 0.3s ease;
+        }
+
+        .refresh-btn:hover {
+            transform: scale(1.05);
+        }
+
+        .status-badge {
+            padding: 0.5em 1em;
+            border-radius: 20px;
+            font-weight: 500;
+        }
+
+        .status-running {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .status-stopped {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .status-unknown {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .table thead th {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #dee2e6;
+            font-weight: 600;
+        }
+
+        .loading-spinner {
+            display: none;
+            margin-right: 8px;
+        }
+
+        .tag-badge {
+            background-color: #e9ecef;
+            color: #495057;
+            padding: 0.3em 0.6em;
+            border-radius: 12px;
+            margin: 0.2em;
+            display: inline-block;
+        }
+
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+        }
+    </style>
+</head>
+<body>
+    <!-- Toast Container -->
+    <div class="toast-container"></div>
+
+    <div class="container-fluid py-4">
+        <!-- Stats Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card stats-card" data-filter="all" id="totalCard">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Instances</h5>
+                        <h2 id="totalInstances">0</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card" data-filter="running" id="runningCard">
+                    <div class="card-body">
+                        <h5 class="card-title">Running Instances</h5>
+                        <h2 id="runningInstances">0</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card" data-filter="resource-groups" id="resourceGroupCard">
+                    <div class="card-body">
+                        <h5 class="card-title">Resource Groups</h5>
+                        <h2 id="resourceGroups">0</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card" id="refreshCard">
+                    <div class="card-body">
+                        <h5 class="card-title">Last Refresh</h5>
+                        <p id="lastRefreshTime" class="h4">Never</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Table Card -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h3 class="mb-0">Azure Instance Dashboard</h3>
+                <button id="refreshBtn" class="btn btn-primary refresh-btn">
+                    <span class="spinner-border spinner-border-sm loading-spinner" role="status" aria-hidden="true"></span>
+                    <i class="fas fa-sync-alt"></i> Refresh Data
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table id="instanceTable" class="table table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>Instance Name</th>
+                                <th>Resource Group</th>
+                                <th>Status</th>
+                                <th>Size</th>
+                                <th>IP Address</th>
+                                <th>Subnet</th>
+                                <th>Location</th>
+                                <th>OS Type</th>
+                                <th>Tags</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.5/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.5/js/dataTables.bootstrap5.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.1/js/dataTables.buttons.min.js"></script>
+    <script src="https://cdn.datatables.net/buttons/2.4.1/js/buttons.bootstrap5.min.js"></script>
+    <script src="https://cdn.datatables.net/responsive/2.4.1/js/dataTables.responsive.min.js"></script>
+    <script src="https://cdn.datatables.net/responsive/2.4.1/js/responsive.bootstrap5.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
+    
+    <script>
+        let activeFilter = 'all';
+        let table;
+
+        function showToast(message, type = 'success') {
+            const toastHtml = `
+                <div class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="toast-header bg-${type} text-white">
+                        <strong class="me-auto">Notification</strong>
+                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                    <div class="toast-body">${message}</div>
+                </div>
+            `;
+            
+            $('.toast-container').append(toastHtml);
+            const toastElement = $('.toast').last();
+            const toast = new bootstrap.Toast(toastElement);
+            toast.show();
+            
+            setTimeout(() => {
+                toastElement.remove();
+            }, 5000);
+        }
+
+        function clearAllFilters() {
+            $('.stats-card').removeClass('active');
+            $('#totalCard').addClass('active');
+            table.search('').columns().search('').draw();
+        }
+
+        function applyFilter(filterType) {
+            $('.stats-card').removeClass('active');
+            
+            switch(filterType) {
+                case 'running':
+                    $('#runningCard').addClass('active');
+                    table.column(2).search('running', true, false).draw();
+                    break;
+                case 'resource-groups':
+                    $('#resourceGroupCard').addClass('active');
+                    // Clear any existing filters first
+                    table.search('').columns().search('').draw();
+                    // Get unique resource groups and update display
+                    let uniqueGroups = table.column(1).data().unique().sort().join('\n');
+                    showToast(`Resource Groups:\n${uniqueGroups}`, 'info');
+                    break;
+                case 'all':
+                default:
+                    $('#totalCard').addClass('active');
+                    table.search('').columns().search('').draw();
+                    break;
+            }
+        }
+
+        function updateStats(data) {
+            const instances = data.instances;
+            const runningCount = instances.filter(i => i.status.toLowerCase().includes('running')).length;
+            const resourceGroupsCount = new Set(instances.map(i => i.resourceGroup)).size;
+            
+            $('#totalInstances').text(instances.length);
+            $('#runningInstances').text(runningCount);
+            $('#resourceGroups').text(resourceGroupsCount);
+            $('#lastRefreshTime').text(data.lastRefresh);
+        }
+
+        function getStatusBadgeHtml(status) {
+            const statusLower = status.toLowerCase();
+            let className = 'status-unknown';
+            
+            if (statusLower.includes('running')) {
+                className = 'status-running';
+            } else if (statusLower.includes('stopped') || statusLower.includes('deallocated')) {
+                className = 'status-stopped';
+            }
+            
+            return `<span class="status-badge ${className}">${status}</span>`;
+        }
+
+        function formatTags(tags) {
+            if (!tags || Object.keys(tags).length === 0) return '';
+            return Object.entries(tags)
+                .map(([key, value]) => `<span class="tag-badge">${key}: ${value}</span>`)
+                .join(' ');
+        }
+
+        $(document).ready(function() {
+            // Add click handlers for stats cards
+            $('.stats-card').click(function() {
+                const filterType = $(this).data('filter');
+                if (filterType) {
+                    activeFilter = filterType;
+                    applyFilter(filterType);
+                }
+            });
+
+            function loadData() {
+                $('.loading-spinner').show();
+                $('#refreshBtn').prop('disabled', true);
+
+                $.get('/api/instances', function(data) {
+                    if (table) {
+                        table.destroy();
+                    }
+                    
+                    updateStats(data);
+                    
+                    table = $('#instanceTable').DataTable({
+                        data: data.instances,
+                        columns: [
+                            { data: 'name' },
+                            { data: 'resourceGroup' },
+                            { 
+                                data: 'status',
+                                render: function(data) {
+                                    return getStatusBadgeHtml(data);
+                                }
+                            },
+                            { data: 'size' },
+                            { data: 'ipAddress' },
+                            { data: 'subnet' },
+                            { data: 'location' },
+                            { data: 'osType' },
+                            { 
+                                data: 'tags',
+                                render: function(data) {
+                                    return formatTags(data);
+                                }
+                            }
+                        ],
+                        dom: '<"row"<"col-sm-12 col-md-6"B><"col-sm-12 col-md-6"f>>rtip',
+                        buttons: [
+                            {
+                                extend: 'collection',
+                                text: 'Export',
+                                buttons: ['copy', 'excel', 'pdf']
+                            }
+                        ],
+                        pageLength: 10,
+                        responsive: true,
+                        order: [[0, 'asc']],
+                        language: {
+                            search: "Filter records:"
+                        }
+                    });
+
+                    // Apply active filter after loading data
+                    applyFilter(activeFilter);
+                    showToast('Data refreshed successfully');
+                }).fail(function(error) {
+                    console.error('Error fetching data:', error);
+                    showToast('Failed to fetch instance data', 'danger');
+                }).always(function() {
+                    $('.loading-spinner').hide();
+                    $('#refreshBtn').prop('disabled', false);
+                });
+            }
+
+            $('#refreshBtn').click(function() {
+                $.post('/api/refresh', function(data) {
+                    if (table) {
+                        table.destroy();
+                    }
+                    updateStats(data);
+                    loadData();
+                }).fail(function(error) {
+                    console.error('Error refreshing data:', error);
+                    showToast('Failed to refresh data', 'danger');
+                });
+            });
+
+            // Initial load
+            loadData();
+
+            // Auto-refresh every 5 minutes
+            setInterval(loadData, 300000);
+        });
+    </script>
+</body>
+</html>
