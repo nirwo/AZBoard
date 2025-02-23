@@ -97,24 +97,61 @@ def get_vm_details(vm_name, resource_group):
         # Get NIC details
         nics = []
         for nic_ref in vm_data.get('networkProfile', {}).get('networkInterfaces', []):
-            nic_id = nic_ref.get('id', '').split('/')[-1]
-            nic_command = f"az network nic show --name {nic_id} --resource-group {resource_group}"
+            nic_id = nic_ref.get('id', '')
+            if not nic_id:
+                continue
+                
+            # Extract NIC name and resource group from the ID
+            nic_parts = nic_id.split('/')
+            nic_name = nic_parts[-1]
+            nic_resource_group = nic_parts[4] if len(nic_parts) > 4 else resource_group
+            
+            nic_command = f"az network nic show --name {nic_name} --resource-group {nic_resource_group}"
             nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True)
+            
             if nic_result.returncode == 0:
                 nic_data = json.loads(nic_result.stdout)
                 ip_configs = nic_data.get('ipConfigurations', [])
-                nics.append({
-                    'name': nic_data.get('name'),
-                    'private_ip': ip_configs[0].get('privateIpAddress') if ip_configs else None,
-                    'public_ip': ip_configs[0].get('publicIpAddress', {}).get('ipAddress') if ip_configs else None,
-                    'subnet': ip_configs[0].get('subnet', {}).get('name') if ip_configs else None
-                })
+                
+                for ip_config in ip_configs:
+                    private_ip = ip_config.get('privateIpAddress')
+                    subnet_id = ip_config.get('subnet', {}).get('id', '')
+                    subnet_name = subnet_id.split('/')[-1] if subnet_id else None
+                    
+                    # Get public IP if it exists
+                    public_ip = None
+                    public_ip_id = ip_config.get('publicIpAddress', {}).get('id')
+                    if public_ip_id:
+                        pip_parts = public_ip_id.split('/')
+                        pip_name = pip_parts[-1]
+                        pip_resource_group = pip_parts[4] if len(pip_parts) > 4 else resource_group
+                        pip_command = f"az network public-ip show --name {pip_name} --resource-group {pip_resource_group}"
+                        pip_result = subprocess.run(pip_command, shell=True, capture_output=True, text=True)
+                        if pip_result.returncode == 0:
+                            pip_data = json.loads(pip_result.stdout)
+                            public_ip = pip_data.get('ipAddress')
+                    
+                    nics.append({
+                        'name': nic_data.get('name'),
+                        'private_ip': private_ip,
+                        'public_ip': public_ip,
+                        'subnet': subnet_name,
+                        'mac_address': nic_data.get('macAddress'),
+                        'enable_ip_forwarding': nic_data.get('enableIpForwarding', False),
+                        'primary': ip_config.get('primary', False)
+                    })
         
         # Get disk details
         disks = []
-        os_disk_id = vm_data.get('storageProfile', {}).get('osDisk', {}).get('managedDisk', {}).get('id', '').split('/')[-1]
+        os_disk = vm_data.get('storageProfile', {}).get('osDisk', {})
+        os_disk_id = os_disk.get('managedDisk', {}).get('id', '')
+        
         if os_disk_id:
-            disk_command = f"az disk show --name {os_disk_id} --resource-group {resource_group}"
+            disk_parts = os_disk_id.split('/')
+            disk_name = disk_parts[-1]
+            disk_resource_group = disk_parts[4] if len(disk_parts) > 4 else resource_group
+            
+            disk_command = f"az disk show --name {disk_name} --resource-group {disk_resource_group}"
             disk_result = subprocess.run(disk_command, shell=True, capture_output=True, text=True)
             if disk_result.returncode == 0:
                 disk_data = json.loads(disk_result.stdout)
@@ -122,14 +159,20 @@ def get_vm_details(vm_name, resource_group):
                     'name': disk_data.get('name'),
                     'size_gb': disk_data.get('diskSizeGb'),
                     'type': disk_data.get('sku', {}).get('name'),
-                    'is_os_disk': True
+                    'is_os_disk': True,
+                    'caching': os_disk.get('caching'),
+                    'storage_account_type': disk_data.get('sku', {}).get('name')
                 })
         
         # Get data disks
         for data_disk in vm_data.get('storageProfile', {}).get('dataDisks', []):
-            disk_id = data_disk.get('managedDisk', {}).get('id', '').split('/')[-1]
+            disk_id = data_disk.get('managedDisk', {}).get('id', '')
             if disk_id:
-                disk_command = f"az disk show --name {disk_id} --resource-group {resource_group}"
+                disk_parts = disk_id.split('/')
+                disk_name = disk_parts[-1]
+                disk_resource_group = disk_parts[4] if len(disk_parts) > 4 else resource_group
+                
+                disk_command = f"az disk show --name {disk_name} --resource-group {disk_resource_group}"
                 disk_result = subprocess.run(disk_command, shell=True, capture_output=True, text=True)
                 if disk_result.returncode == 0:
                     disk_data = json.loads(disk_result.stdout)
@@ -137,7 +180,10 @@ def get_vm_details(vm_name, resource_group):
                         'name': disk_data.get('name'),
                         'size_gb': disk_data.get('diskSizeGb'),
                         'type': disk_data.get('sku', {}).get('name'),
-                        'is_os_disk': False
+                        'is_os_disk': False,
+                        'lun': data_disk.get('lun'),
+                        'caching': data_disk.get('caching'),
+                        'storage_account_type': disk_data.get('sku', {}).get('name')
                     })
         
         return {
@@ -146,7 +192,7 @@ def get_vm_details(vm_name, resource_group):
             'disks': disks
         }
     except Exception as e:
-        app.logger.error(f"Error getting VM details: {str(e)}")
+        app.logger.error(f"Error getting VM details for {vm_name}: {str(e)}")
         return None
 
 def get_storage_accounts():
@@ -198,23 +244,37 @@ def calculate_vm_cost(vm_size, region="eastus"):
     # Azure VM pricing (USD per hour) - This is a simplified version
     # In production, you should use the Azure Retail Prices API
     pricing = {
+        # B-series (burstable)
         'Standard_B1s': 0.0208,
-        'Standard_B2s': 0.0832,
         'Standard_B1ms': 0.0416,
-        'Standard_B2ms': 0.0832,
-        'Standard_D2s_v3': 0.1008,
-        'Standard_D4s_v3': 0.2016,
-        'Standard_D8s_v3': 0.4032,
-        'Standard_E2s_v3': 0.1512,
-        'Standard_E4s_v3': 0.3024,
-        'Standard_E8s_v3': 0.6048,
+        'Standard_B2s': 0.0832,
+        'Standard_B2ms': 0.1664,
+        'Standard_B4ms': 0.3328,
+        'Standard_B8ms': 0.6656,
+        # D-series v4 (general purpose)
+        'Standard_D2_v4': 0.1008,
+        'Standard_D4_v4': 0.2016,
+        'Standard_D8_v4': 0.4032,
+        'Standard_D16_v4': 0.8064,
+        # E-series v4 (memory optimized)
+        'Standard_E2_v4': 0.1260,
+        'Standard_E4_v4': 0.2520,
+        'Standard_E8_v4': 0.5040,
+        'Standard_E16_v4': 1.0080,
+        # F-series v2 (compute optimized)
+        'Standard_F2s_v2': 0.0850,
+        'Standard_F4s_v2': 0.1700,
+        'Standard_F8s_v2': 0.3400,
+        'Standard_F16s_v2': 0.6800,
+        # Default fallback
+        'default': 0.1000
     }
     
-    # Get base price
-    base_price = pricing.get(vm_size, 0.1)  # Default to $0.1/hour if size not found
+    # Get hourly cost
+    hourly_cost = pricing.get(vm_size, pricing['default'])
     
-    # Calculate monthly cost (730 hours per month on average)
-    monthly_cost = base_price * 730
+    # Calculate monthly cost (assuming 730 hours per month)
+    monthly_cost = hourly_cost * 730
     
     return monthly_cost
 
@@ -345,6 +405,7 @@ def get_instances():
         vm_size = request.args.get('vm_size')
         
         filtered_instances = instances["instances"]
+        total_monthly_cost = instances["total_monthly_cost"]
         
         if resource_group:
             filtered_instances = [i for i in filtered_instances if i["resourceGroup"] == resource_group]
@@ -355,10 +416,14 @@ def get_instances():
         if vm_size:
             filtered_instances = [i for i in filtered_instances if i["size"] == vm_size]
             
+        # Recalculate total cost for filtered instances
+        filtered_monthly_cost = sum(instance["monthly_cost"] for instance in filtered_instances)
+            
         return jsonify({
             "instances": filtered_instances,
             "totalCount": len(instances["instances"]),
-            "filteredCount": len(filtered_instances)
+            "filteredCount": len(filtered_instances),
+            "total_monthly_cost": filtered_monthly_cost
         })
         
     except Exception as e:
