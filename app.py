@@ -12,6 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import time
 import secrets
+import os
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
@@ -25,6 +26,8 @@ handler.setFormatter(logging.Formatter(
 app.logger.addHandler(handler)
 
 # Configure caching
+CACHE_DIR = 'cache'
+CACHE_DURATION = 300  # Cache data for 5 minutes
 cache = Cache(app, config={'CACHE_TYPE': 'simple'})
 
 # Configure rate limiting
@@ -83,8 +86,51 @@ def get_vm_size(vm_name, resource_group):
     except Exception:
         return 'Unknown'
 
+def get_cache_file_path(vm_name, resource_group):
+    """Generate cache file path for a VM"""
+    return os.path.join(CACHE_DIR, f"{resource_group}_{vm_name}.cache")
+
+def load_from_cache(vm_name, resource_group):
+    """Load VM data from cache if it exists and is not expired"""
+    cache_file = get_cache_file_path(vm_name, resource_group)
+    try:
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r') as f:
+                cached_data = json.load(f)
+                cache_time = datetime.fromisoformat(cached_data['cache_time'])
+                
+                # Check if cache is still valid
+                if datetime.now() - cache_time < datetime.timedelta(minutes=CACHE_DURATION):
+                    app.logger.info(f"Using cached data for VM {vm_name}")
+                    return cached_data['data']
+    except Exception as e:
+        app.logger.error(f"Error reading cache: {str(e)}")
+    return None
+
+def save_to_cache(vm_name, resource_group, data):
+    """Save VM data to cache"""
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    
+    cache_file = get_cache_file_path(vm_name, resource_group)
+    try:
+        cache_data = {
+            'cache_time': datetime.now().isoformat(),
+            'data': data
+        }
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f)
+        app.logger.info(f"Cached data for VM {vm_name}")
+    except Exception as e:
+        app.logger.error(f"Error writing cache: {str(e)}")
+
 def get_vm_details(vm_name, resource_group):
     """Get detailed VM information including NICs and disks"""
+    # Try to get data from cache first
+    cached_data = load_from_cache(vm_name, resource_group)
+    if cached_data:
+        return cached_data
+        
     try:
         app.logger.info(f"Getting details for VM {vm_name} in resource group {resource_group}")
         
@@ -184,6 +230,10 @@ def get_vm_details(vm_name, resource_group):
             'nics': nics,
             'disks': disks
         }
+        
+        # Save the result to cache
+        save_to_cache(vm_name, resource_group, result)
+        
         return result
         
     except Exception as e:
@@ -451,7 +501,7 @@ def get_network_data():
         app.logger.error(f"Error getting network data: {str(e)}")
         return jsonify({"error": "Failed to get network data"})
 
-@cache.memoize(timeout=300)
+@cache.memoize(timeout=CACHE_DURATION)
 def get_azure_instances():
     """Get Azure instances with detailed information"""
     if not check_azure_login():
