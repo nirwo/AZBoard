@@ -86,111 +86,106 @@ def get_vm_size(vm_name, resource_group):
 def get_vm_details(vm_name, resource_group):
     """Get detailed VM information including NICs and disks"""
     try:
-        # Get VM details
-        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} -d"
+        app.logger.info(f"Getting details for VM {vm_name} in resource group {resource_group}")
+        
+        # Get VM details including IP addresses
+        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} --show-details -d"
         vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
+        
         if vm_result.returncode != 0:
+            app.logger.error(f"Failed to get VM details: {vm_result.stderr}")
             return None
         
         vm_data = json.loads(vm_result.stdout)
         
-        # Get NIC details
+        # Get IP addresses using the simpler command
+        ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
+        ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True)
+        
         nics = []
-        for nic_ref in vm_data.get('networkProfile', {}).get('networkInterfaces', []):
-            nic_id = nic_ref.get('id', '')
-            if not nic_id:
-                continue
+        if ip_result.returncode == 0:
+            ip_data = json.loads(ip_result.stdout)
+            if ip_data and len(ip_data) > 0:
+                network = ip_data[0].get('virtualMachine', {}).get('network', {})
+                private_ips = network.get('privateIpAddresses', [])
+                public_ips = network.get('publicIpAddresses', [])
                 
-            # Extract NIC name and resource group from the ID
-            nic_parts = nic_id.split('/')
-            nic_name = nic_parts[-1]
-            nic_resource_group = nic_parts[4] if len(nic_parts) > 4 else resource_group
-            
-            nic_command = f"az network nic show --name {nic_name} --resource-group {nic_resource_group}"
-            nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True)
-            
-            if nic_result.returncode == 0:
-                nic_data = json.loads(nic_result.stdout)
-                ip_configs = nic_data.get('ipConfigurations', [])
-                
-                for ip_config in ip_configs:
-                    private_ip = ip_config.get('privateIpAddress')
-                    subnet_id = ip_config.get('subnet', {}).get('id', '')
-                    subnet_name = subnet_id.split('/')[-1] if subnet_id else None
+                # Get NIC details for additional information
+                for nic_ref in vm_data.get('networkProfile', {}).get('networkInterfaces', []):
+                    nic_id = nic_ref.get('id', '')
+                    if not nic_id:
+                        continue
                     
-                    # Get public IP if it exists
-                    public_ip = None
-                    public_ip_id = ip_config.get('publicIpAddress', {}).get('id')
-                    if public_ip_id:
-                        pip_parts = public_ip_id.split('/')
-                        pip_name = pip_parts[-1]
-                        pip_resource_group = pip_parts[4] if len(pip_parts) > 4 else resource_group
-                        pip_command = f"az network public-ip show --name {pip_name} --resource-group {pip_resource_group}"
-                        pip_result = subprocess.run(pip_command, shell=True, capture_output=True, text=True)
-                        if pip_result.returncode == 0:
-                            pip_data = json.loads(pip_result.stdout)
-                            public_ip = pip_data.get('ipAddress')
+                    nic_parts = nic_id.split('/')
+                    nic_name = nic_parts[-1]
+                    nic_resource_group = nic_parts[4] if len(nic_parts) > 4 else resource_group
                     
-                    nics.append({
-                        'name': nic_data.get('name'),
-                        'private_ip': private_ip,
-                        'public_ip': public_ip,
-                        'subnet': subnet_name,
-                        'mac_address': nic_data.get('macAddress'),
-                        'enable_ip_forwarding': nic_data.get('enableIpForwarding', False),
-                        'primary': ip_config.get('primary', False)
-                    })
+                    # Get NIC details for subnet information
+                    nic_command = f"az network nic show -n {nic_name} -g {nic_resource_group}"
+                    nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True)
+                    
+                    if nic_result.returncode == 0:
+                        nic_data = json.loads(nic_result.stdout)
+                        ip_configs = nic_data.get('ipConfigurations', [])
+                        
+                        for i, ip_config in enumerate(ip_configs):
+                            subnet_id = ip_config.get('subnet', {}).get('id', '')
+                            subnet_parts = subnet_id.split('/') if subnet_id else []
+                            vnet_name = subnet_parts[-3] if len(subnet_parts) > 3 else 'Not configured'
+                            subnet_name = subnet_parts[-1] if subnet_parts else 'Not configured'
+                            
+                            private_ip = private_ips[i] if i < len(private_ips) else 'Not configured'
+                            public_ip = public_ips[i].get('ipAddress') if i < len(public_ips) else 'Not configured'
+                            
+                            nics.append({
+                                'name': nic_name,
+                                'private_ip': private_ip,
+                                'public_ip': public_ip,
+                                'subnet': subnet_name,
+                                'vnet': vnet_name,
+                                'status': 'Configured',
+                                'primary': ip_config.get('primary', False)
+                            })
+        
+        # If no NICs were found through IP addresses, add a default entry
+        if not nics:
+            nics.append({
+                'name': 'Default NIC',
+                'private_ip': 'Not configured',
+                'public_ip': 'Not configured',
+                'subnet': 'Not configured',
+                'vnet': 'Not configured',
+                'status': 'No IP configuration'
+            })
         
         # Get disk details
         disks = []
         os_disk = vm_data.get('storageProfile', {}).get('osDisk', {})
-        os_disk_id = os_disk.get('managedDisk', {}).get('id', '')
+        if os_disk:
+            disks.append({
+                'name': os_disk.get('name', 'OS Disk'),
+                'size_gb': os_disk.get('diskSizeGb'),
+                'type': os_disk.get('managedDisk', {}).get('storageAccountType'),
+                'is_os_disk': True
+            })
         
-        if os_disk_id:
-            disk_parts = os_disk_id.split('/')
-            disk_name = disk_parts[-1]
-            disk_resource_group = disk_parts[4] if len(disk_parts) > 4 else resource_group
-            
-            disk_command = f"az disk show --name {disk_name} --resource-group {disk_resource_group}"
-            disk_result = subprocess.run(disk_command, shell=True, capture_output=True, text=True)
-            if disk_result.returncode == 0:
-                disk_data = json.loads(disk_result.stdout)
-                disks.append({
-                    'name': disk_data.get('name'),
-                    'size_gb': disk_data.get('diskSizeGb'),
-                    'type': disk_data.get('sku', {}).get('name'),
-                    'is_os_disk': True,
-                    'caching': os_disk.get('caching'),
-                    'storage_account_type': disk_data.get('sku', {}).get('name')
-                })
-        
-        # Get data disks
+        # Add data disks
         for data_disk in vm_data.get('storageProfile', {}).get('dataDisks', []):
-            disk_id = data_disk.get('managedDisk', {}).get('id', '')
-            if disk_id:
-                disk_parts = disk_id.split('/')
-                disk_name = disk_parts[-1]
-                disk_resource_group = disk_parts[4] if len(disk_parts) > 4 else resource_group
-                
-                disk_command = f"az disk show --name {disk_name} --resource-group {disk_resource_group}"
-                disk_result = subprocess.run(disk_command, shell=True, capture_output=True, text=True)
-                if disk_result.returncode == 0:
-                    disk_data = json.loads(disk_result.stdout)
-                    disks.append({
-                        'name': disk_data.get('name'),
-                        'size_gb': disk_data.get('diskSizeGb'),
-                        'type': disk_data.get('sku', {}).get('name'),
-                        'is_os_disk': False,
-                        'lun': data_disk.get('lun'),
-                        'caching': data_disk.get('caching'),
-                        'storage_account_type': disk_data.get('sku', {}).get('name')
-                    })
+            disks.append({
+                'name': data_disk.get('name', 'Data Disk'),
+                'size_gb': data_disk.get('diskSizeGb'),
+                'type': data_disk.get('managedDisk', {}).get('storageAccountType'),
+                'is_os_disk': False,
+                'lun': data_disk.get('lun')
+            })
         
-        return {
+        result = {
             'vm': vm_data,
             'nics': nics,
             'disks': disks
         }
+        return result
+        
     except Exception as e:
         app.logger.error(f"Error getting VM details for {vm_name}: {str(e)}")
         return None
@@ -465,10 +460,13 @@ def get_azure_instances():
     try:
         app.logger.info("Fetching Azure instances data...")
         
-        # Get VM list
-        vm_command = "az vm list --show-details -d"
+        # Get VM list with all details
+        vm_command = "az vm list --show-details -d --query '[].{name:name,resourceGroup:resourceGroup,powerState:powerState,size:hardwareProfile.vmSize,location:location,osType:storageProfile.osDisk.osType}'"
+        app.logger.info(f"Running VM list command: {vm_command}")
         vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
+        
         if vm_result.returncode != 0:
+            app.logger.error(f"Failed to fetch VM list: {vm_result.stderr}")
             return {"error": "Failed to fetch VM list"}
         
         vms = json.loads(vm_result.stdout)
@@ -476,33 +474,43 @@ def get_azure_instances():
         total_cost = 0
         
         for vm in vms:
+            vm_name = vm.get('name')
+            resource_group = vm.get('resourceGroup')
+            
+            app.logger.info(f"Processing VM: {vm_name} in resource group {resource_group}")
+            
             # Get detailed information
-            details = get_vm_details(vm.get('name'), vm.get('resourceGroup'))
+            details = get_vm_details(vm_name, resource_group)
             if not details:
+                app.logger.warning(f"Could not get details for VM {vm_name}")
                 continue
             
             # Calculate cost
-            monthly_cost = calculate_vm_cost(vm.get('hardwareProfile', {}).get('vmSize'))
+            monthly_cost = calculate_vm_cost(vm.get('size'))
             total_cost += monthly_cost
             
             instance = {
-                'name': vm.get('name'),
-                'resourceGroup': vm.get('resourceGroup'),
+                'name': vm_name,
+                'resourceGroup': resource_group,
                 'status': vm.get('powerState', 'Unknown'),
-                'size': vm.get('hardwareProfile', {}).get('vmSize'),
+                'size': vm.get('size'),
                 'location': vm.get('location'),
-                'osType': vm.get('storageProfile', {}).get('osDisk', {}).get('osType'),
-                'tags': vm.get('tags', {}),
+                'osType': vm.get('osType'),
                 'monthly_cost': monthly_cost,
                 'nics': details['nics'],
                 'disks': details['disks']
             }
+            
+            app.logger.info(f"Instance details: {json.dumps(instance)}")
             instances.append(instance)
         
-        return {
+        result = {
             "instances": instances,
             "total_monthly_cost": total_cost
         }
+        
+        app.logger.info(f"Total instances found: {len(instances)}")
+        return result
         
     except Exception as e:
         app.logger.error(f"Error fetching instances: {str(e)}")

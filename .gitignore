@@ -34,5 +34,9 @@ ENV/
 *.log
 azure_dashboard.log*
 
+# Cache directory
+cache/
+*.cache
+
 # Local environment
 .env

@@ -186,10 +186,15 @@ function formatNetworkInfo(nics) {
     if (!nics || !nics.length) return 'No network interfaces';
     return nics.map(nic => `
         <div class="small mb-2">
-            <strong>${nic.name}</strong><br>
-            Private IP: ${nic.private_ip || 'N/A'}<br>
-            Public IP: ${nic.public_ip || 'N/A'}<br>
-            Subnet: ${nic.subnet || 'N/A'}
+            <strong>${nic.name}</strong>
+            ${nic.status === 'No IP configuration' ? 
+                `<span class="badge bg-warning">No IP Configuration</span>` :
+                `<br>
+                <i class="fas fa-network-wired"></i> VNet: ${nic.vnet}<br>
+                <i class="fas fa-project-diagram"></i> Subnet: ${nic.subnet}<br>
+                <i class="fas fa-laptop-house"></i> Private IP: ${nic.private_ip}<br>
+                <i class="fas fa-globe"></i> Public IP: ${nic.public_ip}`
+            }
         </div>
     `).join('');
 }
