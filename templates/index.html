@@ -1,377 +1,313 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azure Instance Dashboard</title>
-    <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- DataTables CSS -->
-    <link href="https://cdn.datatables.net/1.13.5/css/dataTables.bootstrap5.min.css" rel="stylesheet">
-    <link href="https://cdn.datatables.net/buttons/2.4.1/css/buttons.bootstrap5.min.css" rel="stylesheet">
-    <link href="https://cdn.datatables.net/responsive/2.4.1/css/responsive.bootstrap5.min.css" rel="stylesheet">
-    <!-- Custom CSS -->
-    <style>
-        :root {
-            --primary-color: #0078D4;
-            --secondary-color: #50E6FF;
-        }
-        
-        body {
-            background-color: #f8f9fa;
-        }
+{% extends "base.html" %}
 
-        .card {
-            border-radius: 15px;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-            margin-bottom: 20px;
-        }
+{% block additional_styles %}
+<style>
+    .filter-section {
+        background: white;
+        border-radius: 15px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    }
 
-        .card-header {
-            background-color: white;
-            border-bottom: none;
-            border-radius: 15px 15px 0 0 !important;
-            padding: 1.5rem;
-        }
+    .filter-group {
+        margin-bottom: 1rem;
+    }
 
-        .stats-card {
-            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-            color: white;
-            transition: transform 0.3s ease;
-            cursor: pointer;
-        }
+    .filter-group label {
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
 
-        .stats-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
-        }
+    .filter-badge {
+        background: var(--primary-color);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 20px;
+        margin: 0.25rem;
+        display: inline-flex;
+        align-items: center;
+    }
 
-        .stats-card.active {
-            background: linear-gradient(135deg, var(--secondary-color), var(--primary-color));
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
-        }
+    .filter-badge .close {
+        margin-left: 0.5rem;
+        cursor: pointer;
+    }
 
-        .refresh-btn {
-            border-radius: 20px;
-            padding: 0.5rem 1.5rem;
-            transition: all 0.3s ease;
-        }
+    .stats-card {
+        background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+        color: white;
+        cursor: pointer;
+        overflow: hidden;
+        position: relative;
+    }
+</style>
+{% endblock %}
 
-        .refresh-btn:hover {
-            transform: scale(1.05);
-        }
-
-        .status-badge {
-            padding: 0.5em 1em;
-            border-radius: 20px;
-            font-weight: 500;
-        }
-
-        .status-running {
-            background-color: #28a745;
-            color: white;
-        }
-
-        .status-stopped {
-            background-color: #dc3545;
-            color: white;
-        }
-
-        .status-unknown {
-            background-color: #6c757d;
-            color: white;
-        }
-
-        .table thead th {
-            background-color: #f8f9fa;
-            border-bottom: 2px solid #dee2e6;
-            font-weight: 600;
-        }
-
-        .loading-spinner {
-            display: none;
-            margin-right: 8px;
-        }
-
-        .tag-badge {
-            background-color: #e9ecef;
-            color: #495057;
-            padding: 0.3em 0.6em;
-            border-radius: 12px;
-            margin: 0.2em;
-            display: inline-block;
-        }
-
-        .toast-container {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            z-index: 1050;
-        }
-    </style>
-</head>
-<body>
-    <!-- Toast Container -->
-    <div class="toast-container"></div>
-
-    <div class="container-fluid py-4">
-        <!-- Stats Cards -->
-        <div class="row mb-4">
-            <div class="col-md-3">
-                <div class="card stats-card" data-filter="all" id="totalCard">
-                    <div class="card-body">
-                        <h5 class="card-title">Total Instances</h5>
-                        <h2 id="totalInstances">0</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card stats-card" data-filter="running" id="runningCard">
-                    <div class="card-body">
-                        <h5 class="card-title">Running Instances</h5>
-                        <h2 id="runningInstances">0</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card stats-card" data-filter="resource-groups" id="resourceGroupCard">
-                    <div class="card-body">
-                        <h5 class="card-title">Resource Groups</h5>
-                        <h2 id="resourceGroups">0</h2>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-3">
-                <div class="card stats-card" id="refreshCard">
-                    <div class="card-body">
-                        <h5 class="card-title">Last Refresh</h5>
-                        <p id="lastRefreshTime" class="h4">Never</p>
-                    </div>
+{% block content %}
+<div class="container-fluid py-4">
+    <!-- Stats Cards -->
+    <div class="row mb-4">
+        <div class="col-md-4">
+            <div class="card stats-card" data-filter="all">
+                <div class="card-body">
+                    <h5 class="card-title">Total Instances</h5>
+                    <h2 class="total-instances">-</h2>
                 </div>
             </div>
         </div>
-
-        <!-- Main Table Card -->
-        <div class="card">
-            <div class="card-header d-flex justify-content-between align-items-center">
-                <h3 class="mb-0">Azure Instance Dashboard</h3>
-                <button id="refreshBtn" class="btn btn-primary refresh-btn">
-                    <span class="spinner-border spinner-border-sm loading-spinner" role="status" aria-hidden="true"></span>
-                    <i class="fas fa-sync-alt"></i> Refresh Data
-                </button>
+        <div class="col-md-4">
+            <div class="card stats-card" data-filter="running">
+                <div class="card-body">
+                    <h5 class="card-title">Running Instances</h5>
+                    <h2 class="running-instances">-</h2>
+                </div>
             </div>
-            <div class="card-body">
-                <div class="table-responsive">
-                    <table id="instanceTable" class="table table-striped table-hover">
-                        <thead>
-                            <tr>
-                                <th>Instance Name</th>
-                                <th>Resource Group</th>
-                                <th>Status</th>
-                                <th>Size</th>
-                                <th>IP Address</th>
-                                <th>Subnet</th>
-                                <th>Location</th>
-                                <th>OS Type</th>
-                                <th>Tags</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                        </tbody>
-                    </table>
+        </div>
+        <div class="col-md-4">
+            <div class="card stats-card" data-filter="resource-groups">
+                <div class="card-body">
+                    <h5 class="card-title">Resource Groups</h5>
+                    <h2 class="resource-groups">-</h2>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Scripts -->
-    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.5/js/jquery.dataTables.min.js"></script>
-    <script src="https://cdn.datatables.net/1.13.5/js/dataTables.bootstrap5.min.js"></script>
-    <script src="https://cdn.datatables.net/buttons/2.4.1/js/dataTables.buttons.min.js"></script>
-    <script src="https://cdn.datatables.net/buttons/2.4.1/js/buttons.bootstrap5.min.js"></script>
-    <script src="https://cdn.datatables.net/responsive/2.4.1/js/dataTables.responsive.min.js"></script>
-    <script src="https://cdn.datatables.net/responsive/2.4.1/js/responsive.bootstrap5.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
-    
-    <script>
-        let activeFilter = 'all';
-        let table;
-
-        function showToast(message, type = 'success') {
-            const toastHtml = `
-                <div class="toast" role="alert" aria-live="assertive" aria-atomic="true">
-                    <div class="toast-header bg-${type} text-white">
-                        <strong class="me-auto">Notification</strong>
-                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
-                    </div>
-                    <div class="toast-body">${message}</div>
+    <!-- Filter Section -->
+    <div class="filter-section mb-4">
+        <div class="row">
+            <div class="col-md-3">
+                <div class="filter-group">
+                    <label>Resource Group</label>
+                    <select class="form-select" id="resourceGroupFilter">
+                        <option value="">All Resource Groups</option>
+                    </select>
                 </div>
+            </div>
+            <div class="col-md-3">
+                <div class="filter-group">
+                    <label>Status</label>
+                    <select class="form-select" id="statusFilter">
+                        <option value="">All Statuses</option>
+                        <option value="running">Running</option>
+                        <option value="stopped">Stopped</option>
+                        <option value="deallocated">Deallocated</option>
+                    </select>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="filter-group">
+                    <label>VM Size</label>
+                    <select class="form-select" id="vmSizeFilter">
+                        <option value="">All Sizes</option>
+                    </select>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="filter-group">
+                    <label>Actions</label>
+                    <div class="d-flex">
+                        <button class="btn btn-primary me-2 flex-grow-1" id="applyFilters">
+                            Apply Filters
+                        </button>
+                        <button class="btn btn-secondary flex-grow-1" id="clearFilters">
+                            Clear
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="row mt-3">
+            <div class="col">
+                <div id="activeFilters"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Instances Table -->
+    <div class="card">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h5 class="card-title mb-0">Azure Instances</h5>
+                <button class="btn btn-primary refresh-btn" id="refreshBtn">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+            </div>
+            <div class="table-responsive">
+                <table id="instancesTable" class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Resource Group</th>
+                            <th>Status</th>
+                            <th>Size</th>
+                            <th>Location</th>
+                            <th>Tags</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let table;
+let activeFilters = {};
+
+function updateActiveFilters() {
+    const $container = $('#activeFilters');
+    $container.empty();
+    
+    Object.entries(activeFilters).forEach(([key, value]) => {
+        if (value) {
+            const badge = `
+                <span class="filter-badge">
+                    ${key}: ${value}
+                    <span class="close" data-filter="${key}">×</span>
+                </span>
             `;
-            
-            $('.toast-container').append(toastHtml);
-            const toastElement = $('.toast').last();
-            const toast = new bootstrap.Toast(toastElement);
-            toast.show();
-            
-            setTimeout(() => {
-                toastElement.remove();
-            }, 5000);
+            $container.append(badge);
         }
+    });
+}
 
-        function clearAllFilters() {
-            $('.stats-card').removeClass('active');
-            $('#totalCard').addClass('active');
-            table.search('').columns().search('').draw();
-        }
-
-        function applyFilter(filterType) {
-            $('.stats-card').removeClass('active');
-            
-            switch(filterType) {
-                case 'running':
-                    $('#runningCard').addClass('active');
-                    table.column(2).search('running', true, false).draw();
-                    break;
-                case 'resource-groups':
-                    $('#resourceGroupCard').addClass('active');
-                    // Clear any existing filters first
-                    table.search('').columns().search('').draw();
-                    // Get unique resource groups and update display
-                    let uniqueGroups = table.column(1).data().unique().sort().join('\n');
-                    showToast(`Resource Groups:\n${uniqueGroups}`, 'info');
-                    break;
-                case 'all':
-                default:
-                    $('#totalCard').addClass('active');
-                    table.search('').columns().search('').draw();
-                    break;
-            }
-        }
-
-        function updateStats(data) {
-            const instances = data.instances;
-            const runningCount = instances.filter(i => i.status.toLowerCase().includes('running')).length;
-            const resourceGroupsCount = new Set(instances.map(i => i.resourceGroup)).size;
-            
-            $('#totalInstances').text(instances.length);
-            $('#runningInstances').text(runningCount);
-            $('#resourceGroups').text(resourceGroupsCount);
-            $('#lastRefreshTime').text(data.lastRefresh);
-        }
-
-        function getStatusBadgeHtml(status) {
-            const statusLower = status.toLowerCase();
-            let className = 'status-unknown';
-            
-            if (statusLower.includes('running')) {
-                className = 'status-running';
-            } else if (statusLower.includes('stopped') || statusLower.includes('deallocated')) {
-                className = 'status-stopped';
+function loadData() {
+    startLoadingAnimation();
+    
+    // Build query parameters
+    const params = new URLSearchParams();
+    Object.entries(activeFilters).forEach(([key, value]) => {
+        if (value) params.append(key, value);
+    });
+    
+    $.get(`/api/instances?${params.toString()}`)
+        .then(data => {
+            if (data.error) {
+                showToast(data.error, 'danger');
+                return;
             }
             
-            return `<span class="status-badge ${className}">${status}</span>`;
-        }
-
-        function formatTags(tags) {
-            if (!tags || Object.keys(tags).length === 0) return '';
-            return Object.entries(tags)
-                .map(([key, value]) => `<span class="tag-badge">${key}: ${value}</span>`)
-                .join(' ');
-        }
-
-        $(document).ready(function() {
-            // Add click handlers for stats cards
-            $('.stats-card').click(function() {
-                const filterType = $(this).data('filter');
-                if (filterType) {
-                    activeFilter = filterType;
-                    applyFilter(filterType);
-                }
+            // Update stats
+            $('.total-instances').text(data.totalCount);
+            $('.running-instances').text(
+                data.instances.filter(i => i.status.toLowerCase().includes('running')).length
+            );
+            $('.resource-groups').text(
+                new Set(data.instances.map(i => i.resourceGroup)).size
+            );
+            
+            // Update filters
+            const resourceGroups = [...new Set(data.instances.map(i => i.resourceGroup))];
+            const vmSizes = [...new Set(data.instances.map(i => i.size))];
+            
+            $('#resourceGroupFilter').find('option:gt(0)').remove();
+            resourceGroups.forEach(rg => {
+                $('#resourceGroupFilter').append(`<option value="${rg}">${rg}</option>`);
             });
-
-            function loadData() {
-                $('.loading-spinner').show();
-                $('#refreshBtn').prop('disabled', true);
-
-                $.get('/api/instances', function(data) {
-                    if (table) {
-                        table.destroy();
-                    }
-                    
-                    updateStats(data);
-                    
-                    table = $('#instanceTable').DataTable({
-                        data: data.instances,
-                        columns: [
-                            { data: 'name' },
-                            { data: 'resourceGroup' },
-                            { 
-                                data: 'status',
-                                render: function(data) {
-                                    return getStatusBadgeHtml(data);
-                                }
-                            },
-                            { data: 'size' },
-                            { data: 'ipAddress' },
-                            { data: 'subnet' },
-                            { data: 'location' },
-                            { data: 'osType' },
-                            { 
-                                data: 'tags',
-                                render: function(data) {
-                                    return formatTags(data);
-                                }
+            
+            $('#vmSizeFilter').find('option:gt(0)').remove();
+            vmSizes.forEach(size => {
+                $('#vmSizeFilter').append(`<option value="${size}">${size}</option>`);
+            });
+            
+            // Update table
+            if (table) {
+                table.clear().rows.add(data.instances).draw();
+            } else {
+                table = $('#instancesTable').DataTable({
+                    data: data.instances,
+                    columns: [
+                        { data: 'name' },
+                        { data: 'resourceGroup' },
+                        {
+                            data: 'status',
+                            render: function(data) {
+                                const status = data.toLowerCase();
+                                let className = 'status-unknown';
+                                if (status.includes('running')) className = 'status-running';
+                                else if (status.includes('stopped') || status.includes('deallocated')) className = 'status-stopped';
+                                return `<span class="status-badge ${className}">${data}</span>`;
                             }
-                        ],
-                        dom: '<"row"<"col-sm-12 col-md-6"B><"col-sm-12 col-md-6"f>>rtip',
-                        buttons: [
-                            {
-                                extend: 'collection',
-                                text: 'Export',
-                                buttons: ['copy', 'excel', 'pdf']
+                        },
+                        { data: 'size' },
+                        { data: 'location' },
+                        {
+                            data: 'tags',
+                            render: function(data) {
+                                return Object.entries(data || {})
+                                    .map(([key, value]) => `<span class="tag-badge">${key}: ${value}</span>`)
+                                    .join(' ');
                             }
-                        ],
-                        pageLength: 10,
-                        responsive: true,
-                        order: [[0, 'asc']],
-                        language: {
-                            search: "Filter records:"
                         }
-                    });
-
-                    // Apply active filter after loading data
-                    applyFilter(activeFilter);
-                    showToast('Data refreshed successfully');
-                }).fail(function(error) {
-                    console.error('Error fetching data:', error);
-                    showToast('Failed to fetch instance data', 'danger');
-                }).always(function() {
-                    $('.loading-spinner').hide();
-                    $('#refreshBtn').prop('disabled', false);
+                    ],
+                    responsive: true,
+                    dom: 'Bfrtip',
+                    buttons: ['copy', 'excel', 'pdf'],
+                    order: [[0, 'asc']]
                 });
             }
-
-            $('#refreshBtn').click(function() {
-                $.post('/api/refresh', function(data) {
-                    if (table) {
-                        table.destroy();
-                    }
-                    updateStats(data);
-                    loadData();
-                }).fail(function(error) {
-                    console.error('Error refreshing data:', error);
-                    showToast('Failed to refresh data', 'danger');
-                });
-            });
-
-            // Initial load
-            loadData();
-
-            // Auto-refresh every 5 minutes
-            setInterval(loadData, 300000);
+        })
+        .catch(error => {
+            console.error('Error loading data:', error);
+            showToast('Failed to load instance data', 'danger');
+        })
+        .finally(() => {
+            stopLoadingAnimation();
         });
-    </script>
-</body>
-</html>
+}
+
+$(document).ready(function() {
+    // Initialize filters
+    $('#applyFilters').click(function() {
+        activeFilters = {
+            resource_group: $('#resourceGroupFilter').val(),
+            status: $('#statusFilter').val(),
+            vm_size: $('#vmSizeFilter').val()
+        };
+        updateActiveFilters();
+        loadData();
+    });
+    
+    $('#clearFilters').click(function() {
+        activeFilters = {};
+        $('#resourceGroupFilter, #statusFilter, #vmSizeFilter').val('');
+        updateActiveFilters();
+        loadData();
+    });
+    
+    $(document).on('click', '.filter-badge .close', function() {
+        const filter = $(this).data('filter');
+        activeFilters[filter] = '';
+        $(`#${filter}Filter`).val('');
+        updateActiveFilters();
+        loadData();
+    });
+    
+    // Stats card filtering
+    $('.stats-card').click(function() {
+        const filter = $(this).data('filter');
+        if (filter === 'all') {
+            $('#clearFilters').click();
+        } else if (filter === 'running') {
+            $('#statusFilter').val('running');
+            $('#applyFilters').click();
+        }
+    });
+    
+    // Initial load
+    if (checkAzureLogin()) {
+        loadData();
+    }
+    
+    // Refresh button
+    $('#refreshBtn').click(function() {
+        loadData();
+    });
+});
+</script>
+{% endblock %}
