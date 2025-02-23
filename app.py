@@ -710,6 +710,88 @@ def get_vm_storage_info(resource_group, vm_name):
         app.logger.error(f"Error getting storage info: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/vms')
+def get_vms():
+    """Get paginated list of VMs"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        subscription = request.args.get('subscription', '')
+        
+        # Get list of VMs with minimal info
+        cmd = ['az', 'vm', 'list']
+        if subscription:
+            cmd.extend(['--subscription', subscription])
+        cmd.extend(['--query', '[].{name: name, resourceGroup: resourceGroup, location: location, powerState: powerState, vmSize: hardwareProfile.vmSize}'])
+        cmd.extend(['--output', 'json'])
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            return jsonify({'error': 'Failed to get VM list'}), 500
+            
+        vms = json.loads(result.stdout)
+        
+        # Calculate pagination
+        total = len(vms)
+        start_idx = (page - 1) * per_page
+        end_idx = min(start_idx + per_page, total)
+        current_page_vms = vms[start_idx:end_idx]
+        
+        return jsonify({
+            'vms': current_page_vms,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total + per_page - 1) // per_page
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error getting VM list: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vms/batch')
+def get_vms_batch():
+    """Get batch of VM details"""
+    try:
+        vm_list = request.args.getlist('vms[]')  # Format: resourceGroup/vmName
+        batch_data = {}
+        
+        for vm_info in vm_list:
+            resource_group, vm_name = vm_info.split('/')
+            
+            # Check cache first
+            cached_data = load_from_cache(vm_name, resource_group)
+            if cached_data:
+                batch_data[vm_info] = cached_data
+                continue
+                
+            # Get basic VM info
+            cmd = ['az', 'vm', 'show', '--name', vm_name, '--resource-group', resource_group, '--show-details', '--query', '{name: name, resourceGroup: resourceGroup, location: location, vmSize: hardwareProfile.vmSize, osType: storageProfile.osDisk.osType, powerState: powerState}', '--output', 'json']
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                vm_data = json.loads(result.stdout)
+                batch_data[vm_info] = {'vm': vm_data}
+                
+                # Get IP addresses in background
+                ip_cmd = ['az', 'vm', 'list-ip-addresses', '--name', vm_name, '--resource-group', resource_group, '--output', 'json']
+                ip_result = subprocess.run(ip_cmd, capture_output=True, text=True)
+                
+                if ip_result.returncode == 0:
+                    ip_data = json.loads(ip_result.stdout)
+                    if ip_data and len(ip_data) > 0:
+                        network = ip_data[0].get('virtualMachine', {}).get('network', {})
+                        batch_data[vm_info]['network'] = network
+                
+                # Cache the data
+                save_to_cache(vm_name, resource_group, batch_data[vm_info])
+            
+        return jsonify(batch_data)
+        
+    except Exception as e:
+        app.logger.error(f"Error getting VM batch: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
 def init_scheduler():
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=lambda: cache.delete_memoized(get_azure_instances),

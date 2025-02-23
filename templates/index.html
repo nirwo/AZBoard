@@ -41,6 +41,32 @@
         overflow: hidden;
         position: relative;
     }
+    
+    #loadingOverlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(255, 255, 255, 0.8);
+        display: none;
+        z-index: 1000;
+    }
+
+    .loading-spinner {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+    }
+
+    #errorAlert {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 1000;
+        display: none;
+    }
 </style>
 {% endblock %}
 
@@ -158,363 +184,199 @@
         </div>
     </div>
     <div id="vm-details"></div>
+    
+    <div id="loadingOverlay">
+        <div class="loading-spinner">
+            <div class="spinner-border text-primary" role="status">
+                <span class="sr-only">Loading...</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="errorAlert" class="alert alert-danger" role="alert"></div>
+
+    <nav aria-label="VM pagination">
+        <ul id="pagination" class="pagination justify-content-center"></ul>
+    </nav>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
 let table;
-let activeFilters = {};
+let currentPage = 1;
+let totalPages = 1;
+const perPage = 50;
 
-function updateActiveFilters() {
-    const $container = $('#activeFilters');
-    $container.empty();
+function loadVMs(page = 1) {
+    showLoading();
     
-    Object.entries(activeFilters).forEach(([key, value]) => {
-        if (value) {
-            const badge = `
-                <span class="filter-badge">
-                    ${key}: ${value}
-                    <span class="close" data-filter="${key}">×</span>
-                </span>
-            `;
-            $container.append(badge);
-        }
-    });
-}
-
-function formatNetworkInfo(nics) {
-    if (!nics || !nics.length) return 'No network interfaces';
-    return nics.map(nic => `
-        <div class="small mb-2">
-            <strong>${nic.name}</strong>
-            ${nic.status === 'No IP configuration' ? 
-                `<span class="badge bg-warning">No IP Configuration</span>` :
-                `<br>
-                <i class="fas fa-network-wired"></i> VNet: ${nic.vnet}<br>
-                <i class="fas fa-project-diagram"></i> Subnet: ${nic.subnet}<br>
-                <i class="fas fa-laptop-house"></i> Private IP: ${nic.private_ip}<br>
-                <i class="fas fa-globe"></i> Public IP: ${nic.public_ip}`
-            }
-        </div>
-    `).join('');
-}
-
-function formatStorageInfo(disks) {
-    if (!disks || !disks.length) return 'No disks';
-    return disks.map(disk => `
-        <div class="small mb-2">
-            <strong>${disk.name}</strong><br>
-            Size: ${disk.size_gb}GB<br>
-            Type: ${disk.type}<br>
-            ${disk.is_os_disk ? '<span class="badge bg-info">OS Disk</span>' : '<span class="badge bg-secondary">Data Disk</span>'}
-        </div>
-    `).join('');
-}
-
-function formatCost(cost) {
-    return `$${cost.toFixed(2)}`;
-}
-
-function loadData() {
-    startLoadingAnimation();
-    
-    // Build query parameters
-    const params = new URLSearchParams();
-    Object.entries(activeFilters).forEach(([key, value]) => {
-        if (value) params.append(key, value);
-    });
-    
-    $.get(`/api/instances?${params.toString()}`)
+    fetch(`/api/vms?page=${page}&per_page=${perPage}`)
+        .then(response => response.json())
         .then(data => {
-            if (data.error) {
-                showToast(data.error, 'danger');
-                return;
-            }
-            
-            // Update stats
-            $('.total-instances').text(data.totalCount);
-            $('.running-instances').text(
-                data.instances.filter(i => i.status.toLowerCase().includes('running')).length
-            );
-            $('.resource-groups').text(
-                new Set(data.instances.map(i => i.resourceGroup)).size
-            );
-            $('.total-cost').text(formatCost(data.total_monthly_cost));
-            
-            // Update filters
-            const resourceGroups = [...new Set(data.instances.map(i => i.resourceGroup))];
-            const vmSizes = [...new Set(data.instances.map(i => i.size))];
-            
-            $('#resourceGroupFilter').find('option:gt(0)').remove();
-            resourceGroups.forEach(rg => {
-                $('#resourceGroupFilter').append(`<option value="${rg}">${rg}</option>`);
-            });
-            
-            $('#vmSizeFilter').find('option:gt(0)').remove();
-            vmSizes.forEach(size => {
-                $('#vmSizeFilter').append(`<option value="${size}">${size}</option>`);
-            });
+            currentPage = data.page;
+            totalPages = data.total_pages;
             
             // Update table
             if (table) {
-                table.clear().rows.add(data.instances).draw();
+                table.clear();
+                table.rows.add(data.vms);
+                table.draw();
             } else {
-                table = $('#instancesTable').DataTable({
-                    data: data.instances,
-                    columns: [
-                        { data: 'name' },
-                        { data: 'resourceGroup' },
-                        {
-                            data: 'status',
-                            render: function(data) {
-                                const status = data.toLowerCase();
-                                let className = 'status-unknown';
-                                if (status.includes('running')) className = 'status-running';
-                                else if (status.includes('stopped') || status.includes('deallocated')) className = 'status-stopped';
-                                return `<span class="status-badge ${className}">${data}</span>`;
-                            }
-                        },
-                        { data: 'size' },
-                        {
-                            data: 'nics',
-                            render: formatNetworkInfo
-                        },
-                        {
-                            data: 'disks',
-                            render: formatStorageInfo
-                        },
-                        { data: 'location' },
-                        {
-                            data: 'monthly_cost',
-                            render: formatCost
-                        },
-                        {
-                            data: null,
-                            render: function(data) {
-                                const status = data.status.toLowerCase();
-                                const startBtn = `<button class="btn btn-sm btn-success me-1" onclick="startVM('${data.name}', '${data.resourceGroup}')"><i class="fas fa-play"></i></button>`;
-                                const stopBtn = `<button class="btn btn-sm btn-danger me-1" onclick="stopVM('${data.name}', '${data.resourceGroup}')"><i class="fas fa-stop"></i></button>`;
-                                const restartBtn = `<button class="btn btn-sm btn-warning" onclick="restartVM('${data.name}', '${data.resourceGroup}')"><i class="fas fa-sync"></i></button>`;
-                                
-                                return `<div class="btn-group">
-                                    ${status.includes('running') ? stopBtn + restartBtn : startBtn}
-                                </div>`;
-                            }
-                        }
-                    ],
-                    responsive: true,
-                    dom: 'Bfrtip',
-                    buttons: ['copy', 'excel', 'pdf'],
-                    order: [[0, 'asc']]
-                });
+                initializeTable(data.vms);
             }
-        })
-        .catch(error => {
-            console.error('Error loading data:', error);
-            showToast('Failed to load instance data', 'danger');
-        })
-        .finally(() => {
-            stopLoadingAnimation();
-        });
-}
-
-// VM control functions
-function startVM(name, resourceGroup) {
-    if (!confirm(`Are you sure you want to start VM "${name}"?`)) return;
-    
-    $.post('/api/vm/start', { name, resourceGroup })
-        .then(response => {
-            if (response.error) {
-                showToast(response.error, 'danger');
-            } else {
-                showToast(`Starting VM "${name}"...`, 'success');
-                setTimeout(loadData, 5000);
-            }
-        })
-        .catch(error => {
-            showToast('Failed to start VM', 'danger');
-        });
-}
-
-function stopVM(name, resourceGroup) {
-    if (!confirm(`Are you sure you want to stop VM "${name}"?`)) return;
-    
-    $.post('/api/vm/stop', { name, resourceGroup })
-        .then(response => {
-            if (response.error) {
-                showToast(response.error, 'danger');
-            } else {
-                showToast(`Stopping VM "${name}"...`, 'success');
-                setTimeout(loadData, 5000);
-            }
-        })
-        .catch(error => {
-            showToast('Failed to stop VM', 'danger');
-        });
-}
-
-function restartVM(name, resourceGroup) {
-    if (!confirm(`Are you sure you want to restart VM "${name}"?`)) return;
-    
-    $.post('/api/vm/restart', { name, resourceGroup })
-        .then(response => {
-            if (response.error) {
-                showToast(response.error, 'danger');
-            } else {
-                showToast(`Restarting VM "${name}"...`, 'success');
-                setTimeout(loadData, 5000);
-            }
-        })
-        .catch(error => {
-            showToast('Failed to restart VM', 'danger');
-        });
-}
-
-function updateVMDetails(vm) {
-    const vmName = vm.name;
-    const resourceGroup = vm.resourceGroup;
-    
-    // Show loading state
-    document.getElementById('vm-details').innerHTML = `
-        <div class="card">
-            <div class="card-body">
-                <h5 class="card-title">Loading VM Details...</h5>
-                <div class="progress mb-3">
-                    <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
-                </div>
-                <div id="basic-info">Loading basic information...</div>
-                <div id="network-info">Loading network information...</div>
-                <div id="storage-info">Loading storage information...</div>
-            </div>
-        </div>
-    `;
-    
-    // Update progress bar
-    const progressBar = document.querySelector('.progress-bar');
-    
-    // Load basic info
-    fetch(`/api/vm-basic/${resourceGroup}/${vmName}`)
-        .then(response => response.json())
-        .then(data => {
-            progressBar.style.width = '33%';
-            const basicInfo = data.vm;
-            document.getElementById('basic-info').innerHTML = `
-                <h6>Basic Information</h6>
-                <p><strong>Name:</strong> ${basicInfo.name}</p>
-                <p><strong>Resource Group:</strong> ${basicInfo.resourceGroup}</p>
-                <p><strong>Location:</strong> ${basicInfo.location}</p>
-                <p><strong>Size:</strong> ${basicInfo.vmSize}</p>
-                <p><strong>OS Type:</strong> ${basicInfo.osType}</p>
-                <p><strong>State:</strong> ${basicInfo.provisioningState}</p>
-            `;
-        })
-        .catch(error => {
-            document.getElementById('basic-info').innerHTML = `<div class="alert alert-danger">Error loading basic information: ${error}</div>`;
-        });
-    
-    // Load network info
-    fetch(`/api/vm-network/${resourceGroup}/${vmName}`)
-        .then(response => response.json())
-        .then(data => {
-            progressBar.style.width = '66%';
-            const networkHtml = data.nics.map(nic => `
-                <div class="card mb-2">
-                    <div class="card-body">
-                        <h6>${nic.name}</h6>
-                        <p><strong>Private IP:</strong> ${nic.private_ip}</p>
-                        <p><strong>Public IP:</strong> ${nic.public_ip}</p>
-                        <p><strong>Status:</strong> ${nic.status}</p>
-                    </div>
-                </div>
-            `).join('');
             
-            document.getElementById('network-info').innerHTML = `
-                <h6>Network Information</h6>
-                ${networkHtml}
-            `;
+            // Update pagination
+            updatePagination();
+            
+            // Load details for visible VMs
+            loadVisibleVMDetails();
+            
+            hideLoading();
         })
         .catch(error => {
-            document.getElementById('network-info').innerHTML = `<div class="alert alert-danger">Error loading network information: ${error}</div>`;
-        });
-    
-    // Load storage info
-    fetch(`/api/vm-storage/${resourceGroup}/${vmName}`)
-        .then(response => response.json())
-        .then(data => {
-            progressBar.style.width = '100%';
-            const storageHtml = data.disks.map(disk => `
-                <div class="card mb-2">
-                    <div class="card-body">
-                        <h6>${disk.name}</h6>
-                        <p><strong>Size:</strong> ${disk.size_gb} GB</p>
-                        <p><strong>Type:</strong> ${disk.type}</p>
-                        <p><strong>Role:</strong> ${disk.is_os_disk ? 'OS Disk' : 'Data Disk'}</p>
-                    </div>
-                </div>
-            `).join('');
-            
-            document.getElementById('storage-info').innerHTML = `
-                <h6>Storage Information</h6>
-                ${storageHtml}
-            `;
-            
-            // Remove progress bar after everything is loaded
-            setTimeout(() => {
-                document.querySelector('.progress').remove();
-            }, 500);
-        })
-        .catch(error => {
-            document.getElementById('storage-info').innerHTML = `<div class="alert alert-danger">Error loading storage information: ${error}</div>`;
+            console.error('Error loading VMs:', error);
+            showError('Failed to load VM list');
+            hideLoading();
         });
 }
 
-$(document).ready(function() {
-    // Initialize filters
-    $('#applyFilters').click(function() {
-        activeFilters = {
-            resource_group: $('#resourceGroupFilter').val(),
-            status: $('#statusFilter').val(),
-            vm_size: $('#vmSizeFilter').val()
-        };
-        updateActiveFilters();
-        loadData();
+function updatePagination() {
+    const pagination = document.getElementById('pagination');
+    let html = '';
+    
+    // Previous button
+    html += `<li class="page-item ${currentPage === 1 ? 'disabled' : ''}">
+        <a class="page-link" href="#" data-page="${currentPage - 1}">Previous</a>
+    </li>`;
+    
+    // Page numbers
+    for (let i = Math.max(1, currentPage - 2); i <= Math.min(totalPages, currentPage + 2); i++) {
+        html += `<li class="page-item ${i === currentPage ? 'active' : ''}">
+            <a class="page-link" href="#" data-page="${i}">${i}</a>
+        </li>`;
+    }
+    
+    // Next button
+    html += `<li class="page-item ${currentPage === totalPages ? 'disabled' : ''}">
+        <a class="page-link" href="#" data-page="${currentPage + 1}">Next</a>
+    </li>`;
+    
+    pagination.innerHTML = html;
+}
+
+function loadVisibleVMDetails() {
+    const visibleRows = table.rows({ page: 'current' }).data();
+    const vmBatch = [];
+    
+    visibleRows.each(vm => {
+        vmBatch.push(`${vm.resourceGroup}/${vm.name}`);
     });
     
-    $('#clearFilters').click(function() {
-        activeFilters = {};
-        $('#resourceGroupFilter, #statusFilter, #vmSizeFilter').val('');
-        updateActiveFilters();
-        loadData();
-    });
+    if (vmBatch.length === 0) return;
     
-    $(document).on('click', '.filter-badge .close', function() {
-        const filter = $(this).data('filter');
-        activeFilters[filter] = '';
-        $(`#${filter}Filter`).val('');
-        updateActiveFilters();
-        loadData();
-    });
-    
-    // Stats card filtering
-    $('.stats-card').click(function() {
-        const filter = $(this).data('filter');
-        if (filter === 'all') {
-            $('#clearFilters').click();
-        } else if (filter === 'running') {
-            $('#statusFilter').val('running');
-            $('#applyFilters').click();
+    const queryString = vmBatch.map(vm => `vms[]=${encodeURIComponent(vm)}`).join('&');
+    fetch(`/api/vms/batch?${queryString}`)
+        .then(response => response.json())
+        .then(data => {
+            // Update VM details in the table
+            visibleRows.each(vm => {
+                const vmKey = `${vm.resourceGroup}/${vm.name}`;
+                const details = data[vmKey];
+                if (details) {
+                    // Update network info
+                    if (details.network) {
+                        const privateIps = details.network.privateIpAddresses || [];
+                        const publicIps = details.network.publicIpAddresses || [];
+                        vm.privateIp = privateIps[0] || 'Not configured';
+                        vm.publicIp = publicIps[0]?.ipAddress || 'Not configured';
+                    }
+                    
+                    // Update other details as needed
+                    if (details.vm) {
+                        vm.osType = details.vm.osType;
+                        vm.powerState = details.vm.powerState;
+                    }
+                }
+            });
+            
+            // Redraw the table
+            table.draw(false);
+        })
+        .catch(error => {
+            console.error('Error loading VM details:', error);
+        });
+}
+
+function initializeTable(data) {
+    table = $('#instancesTable').DataTable({
+        data: data,
+        columns: [
+            { data: 'name', title: 'Name' },
+            { data: 'resourceGroup', title: 'Resource Group' },
+            { data: 'location', title: 'Location' },
+            { data: 'vmSize', title: 'Size' },
+            { data: 'powerState', title: 'State' },
+            { 
+                data: 'privateIp',
+                title: 'Private IP',
+                defaultContent: 'Loading...'
+            },
+            { 
+                data: 'publicIp',
+                title: 'Public IP',
+                defaultContent: 'Loading...'
+            }
+        ],
+        pageLength: perPage,
+        dom: '<"row"<"col-sm-12 col-md-6"l><"col-sm-12 col-md-6"f>>' +
+             '<"row"<"col-sm-12"tr>>' +
+             '<"row"<"col-sm-12 col-md-5"i><"col-sm-12 col-md-7"p>>',
+        language: {
+            processing: "Loading...",
+            search: "Filter:",
+            lengthMenu: "Show _MENU_ entries",
+            info: "Showing _START_ to _END_ of _TOTAL_ entries",
+            infoEmpty: "Showing 0 to 0 of 0 entries",
+            infoFiltered: "(filtered from _MAX_ total entries)",
+            paginate: {
+                first: "First",
+                last: "Last",
+                next: "Next",
+                previous: "Previous"
+            }
         }
     });
     
-    // Initial load
-    if (checkAzureLogin()) {
-        loadData();
-    }
+    // Handle pagination clicks
+    $('#pagination').on('click', 'a.page-link', function(e) {
+        e.preventDefault();
+        const page = $(this).data('page');
+        if (page >= 1 && page <= totalPages) {
+            loadVMs(page);
+        }
+    });
+}
+
+function showLoading() {
+    $('#loadingOverlay').show();
+}
+
+function hideLoading() {
+    $('#loadingOverlay').hide();
+}
+
+function showError(message) {
+    $('#errorAlert').text(message).show();
+    setTimeout(() => $('#errorAlert').fadeOut(), 5000);
+}
+
+$(document).ready(function() {
+    loadVMs();
     
     // Refresh button
     $('#refreshBtn').click(function() {
-        loadData();
+        loadVMs(currentPage);
     });
     
     // VM details
