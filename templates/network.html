@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <!-- Stats Cards -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total VNets</h5>
+                    <h2 class="total-vnets">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Public IPs</h5>
+                    <h2 class="total-pips">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total NSGs</h5>
+                    <h2 class="total-nsgs">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Subnets</h5>
+                    <h2 class="total-subnets">-</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Network Resources -->
+    <div class="row">
+        <!-- VNets -->
+        <div class="col-12 mb-4">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Virtual Networks</h5>
+                    <div class="table-responsive">
+                        <table id="vnetTable" class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Resource Group</th>
+                                    <th>Location</th>
+                                    <th>Address Space</th>
+                                    <th>Subnets</th>
+                                    <th>DNS Servers</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Public IPs -->
+        <div class="col-12 mb-4">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Public IP Addresses</h5>
+                    <div class="table-responsive">
+                        <table id="pipTable" class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Resource Group</th>
+                                    <th>Location</th>
+                                    <th>IP Address</th>
+                                    <th>SKU</th>
+                                    <th>Allocation Method</th>
+                                    <th>Associated To</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- NSGs -->
+        <div class="col-12 mb-4">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Network Security Groups</h5>
+                    <div class="table-responsive">
+                        <table id="nsgTable" class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Resource Group</th>
+                                    <th>Location</th>
+                                    <th>Rules</th>
+                                    <th>Associated Subnets</th>
+                                    <th>Associated NICs</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Network Topology -->
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Subnet Distribution</h5>
+                    <canvas id="subnetChart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Public IP Usage</h5>
+                    <canvas id="pipUsageChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+let vnetTable, pipTable, nsgTable;
+
+function formatRules(rules) {
+    if (!rules || !rules.length) return 'No rules';
+    return rules.map(rule => `
+        <div class="small mb-1">
+            <strong>${rule.name}</strong><br>
+            Priority: ${rule.priority}, 
+            Access: ${rule.access}, 
+            Direction: ${rule.direction}
+        </div>
+    `).join('');
+}
+
+function formatSubnets(subnets) {
+    if (!subnets || !subnets.length) return 'No subnets';
+    return subnets.map(subnet => `
+        <div class="small mb-1">
+            <strong>${subnet.name}</strong><br>
+            Address: ${subnet.addressPrefix}
+        </div>
+    `).join('');
+}
+
+function updateCharts(data) {
+    // Subnet distribution chart
+    const subnetsByVnet = {};
+    data.vnets.forEach(vnet => {
+        subnetsByVnet[vnet.name] = vnet.subnets ? vnet.subnets.length : 0;
+    });
+
+    new Chart(document.getElementById('subnetChart'), {
+        type: 'bar',
+        data: {
+            labels: Object.keys(subnetsByVnet),
+            datasets: [{
+                label: 'Number of Subnets',
+                data: Object.values(subnetsByVnet),
+                backgroundColor: '#0078D4'
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Subnets per VNet'
+                }
+            }
+        }
+    });
+
+    // Public IP usage chart
+    const pipUsage = {
+        'In Use': data.public_ips.filter(pip => pip.ipConfiguration).length,
+        'Available': data.public_ips.filter(pip => !pip.ipConfiguration).length
+    };
+
+    new Chart(document.getElementById('pipUsageChart'), {
+        type: 'pie',
+        data: {
+            labels: Object.keys(pipUsage),
+            datasets: [{
+                data: Object.values(pipUsage),
+                backgroundColor: ['#28a745', '#dc3545']
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Public IP Address Usage'
+                }
+            }
+        }
+    });
+}
+
+function loadData() {
+    startLoadingAnimation();
+    
+    $.get('/api/network-data')
+        .then(data => {
+            if (data.error) {
+                showToast(data.error, 'danger');
+                return;
+            }
+            
+            // Update stats
+            $('.total-vnets').text(data.vnets.length);
+            $('.total-pips').text(data.public_ips.length);
+            $('.total-nsgs').text(data.nsgs.length);
+            $('.total-subnets').text(
+                data.vnets.reduce((total, vnet) => total + (vnet.subnets ? vnet.subnets.length : 0), 0)
+            );
+            
+            // Update VNet table
+            if (vnetTable) {
+                vnetTable.clear().rows.add(data.vnets).draw();
+            } else {
+                vnetTable = $('#vnetTable').DataTable({
+                    data: data.vnets,
+                    columns: [
+                        { data: 'name' },
+                        { data: 'resourceGroup' },
+                        { data: 'location' },
+                        { 
+                            data: 'addressSpace.addressPrefixes',
+                            render: data => data ? data.join(', ') : 'N/A'
+                        },
+                        {
+                            data: 'subnets',
+                            render: formatSubnets
+                        },
+                        {
+                            data: 'dhcpOptions.dnsServers',
+                            render: data => data ? data.join(', ') : 'Default Azure DNS'
+                        }
+                    ],
+                    responsive: true,
+                    dom: 'Bfrtip',
+                    buttons: ['copy', 'excel', 'pdf']
+                });
+            }
+            
+            // Update Public IP table
+            if (pipTable) {
+                pipTable.clear().rows.add(data.public_ips).draw();
+            } else {
+                pipTable = $('#pipTable').DataTable({
+                    data: data.public_ips,
+                    columns: [
+                        { data: 'name' },
+                        { data: 'resourceGroup' },
+                        { data: 'location' },
+                        { data: 'ipAddress' },
+                        { data: 'sku.name' },
+                        { data: 'publicIPAllocationMethod' },
+                        {
+                            data: 'ipConfiguration',
+                            render: data => data ? data.id.split('/').pop() : 'Not associated'
+                        }
+                    ],
+                    responsive: true,
+                    dom: 'Bfrtip',
+                    buttons: ['copy', 'excel', 'pdf']
+                });
+            }
+            
+            // Update NSG table
+            if (nsgTable) {
+                nsgTable.clear().rows.add(data.nsgs).draw();
+            } else {
+                nsgTable = $('#nsgTable').DataTable({
+                    data: data.nsgs,
+                    columns: [
+                        { data: 'name' },
+                        { data: 'resourceGroup' },
+                        { data: 'location' },
+                        {
+                            data: 'securityRules',
+                            render: formatRules
+                        },
+                        {
+                            data: 'subnets',
+                            render: data => data ? data.map(s => s.id.split('/').pop()).join(', ') : 'None'
+                        },
+                        {
+                            data: 'networkInterfaces',
+                            render: data => data ? data.map(n => n.id.split('/').pop()).join(', ') : 'None'
+                        }
+                    ],
+                    responsive: true,
+                    dom: 'Bfrtip',
+                    buttons: ['copy', 'excel', 'pdf']
+                });
+            }
+            
+            // Update charts
+            updateCharts(data);
+        })
+        .catch(error => {
+            console.error('Error loading network data:', error);
+            showToast('Failed to load network data', 'danger');
+        })
+        .finally(() => {
+            stopLoadingAnimation();
+        });
+}
+
+$(document).ready(function() {
+    // Initial load
+    if (checkAzureLogin()) {
+        loadData();
+    }
+    
+    // Refresh button
+    $('#refreshBtn').click(function() {
+        loadData();
+    });
+});
+</script>
+{% endblock %}

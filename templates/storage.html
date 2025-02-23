@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <!-- Stats Cards -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Storage Accounts</h5>
+                    <h2 class="total-accounts">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Capacity</h5>
+                    <h2 class="total-capacity">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Total Cost</h5>
+                    <h2 class="total-cost">-</h2>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card stats-card">
+                <div class="card-body">
+                    <h5 class="card-title">Storage Types</h5>
+                    <h2 class="storage-types">-</h2>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Storage Accounts Table -->
+    <div class="card">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h5 class="card-title mb-0">Storage Accounts</h5>
+                <button class="btn btn-primary refresh-btn" id="refreshBtn">
+                    <i class="fas fa-sync-alt"></i> Refresh
+                </button>
+            </div>
+            <div class="table-responsive">
+                <table id="storageTable" class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Resource Group</th>
+                            <th>Location</th>
+                            <th>SKU</th>
+                            <th>Kind</th>
+                            <th>Access Tier</th>
+                            <th>Status</th>
+                            <th>Endpoints</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Storage Analytics -->
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Storage Distribution by Type</h5>
+                    <canvas id="storageTypeChart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Storage Distribution by Location</h5>
+                    <canvas id="storageLocationChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+let storageTable;
+let typeChart;
+let locationChart;
+
+function updateCharts(data) {
+    const accounts = data.storage_accounts;
+    
+    // Process data for charts
+    const typeData = {};
+    const locationData = {};
+    
+    accounts.forEach(account => {
+        // Count by type
+        const type = account.sku.name;
+        typeData[type] = (typeData[type] || 0) + 1;
+        
+        // Count by location
+        const location = account.location;
+        locationData[location] = (locationData[location] || 0) + 1;
+    });
+    
+    // Update type chart
+    new Chart(document.getElementById('storageTypeChart'), {
+        type: 'pie',
+        data: {
+            labels: Object.keys(typeData),
+            datasets: [{
+                data: Object.values(typeData),
+                backgroundColor: [
+                    '#0078D4',
+                    '#50E6FF',
+                    '#28a745',
+                    '#dc3545',
+                    '#ffc107'
+                ]
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Storage Accounts by Type'
+                }
+            }
+        }
+    });
+    
+    // Update location chart
+    new Chart(document.getElementById('storageLocationChart'), {
+        type: 'bar',
+        data: {
+            labels: Object.keys(locationData),
+            datasets: [{
+                label: 'Storage Accounts',
+                data: Object.values(locationData),
+                backgroundColor: '#0078D4'
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Storage Accounts by Location'
+                }
+            }
+        }
+    });
+}
+
+function loadData() {
+    startLoadingAnimation();
+    
+    $.get('/api/storage-data')
+        .then(data => {
+            if (data.error) {
+                showToast(data.error, 'danger');
+                return;
+            }
+            
+            const accounts = data.storage_accounts;
+            
+            // Update stats
+            $('.total-accounts').text(accounts.length);
+            $('.storage-types').text(new Set(accounts.map(a => a.sku.name)).size);
+            
+            // Update table
+            if (storageTable) {
+                storageTable.clear().rows.add(accounts).draw();
+            } else {
+                storageTable = $('#storageTable').DataTable({
+                    data: accounts,
+                    columns: [
+                        { data: 'name' },
+                        { data: 'resourceGroup' },
+                        { data: 'location' },
+                        { data: 'sku.name' },
+                        { data: 'kind' },
+                        { 
+                            data: 'accessTier',
+                            defaultContent: 'N/A'
+                        },
+                        {
+                            data: 'statusOfPrimary',
+                            render: function(data) {
+                                const className = data === 'available' ? 'success' : 'warning';
+                                return `<span class="badge bg-${className}">${data}</span>`;
+                            }
+                        },
+                        {
+                            data: 'primaryEndpoints',
+                            render: function(data) {
+                                if (!data) return 'N/A';
+                                return Object.entries(data)
+                                    .map(([key, value]) => `<div class="small">${key}: ${value}</div>`)
+                                    .join('');
+                            }
+                        }
+                    ],
+                    responsive: true,
+                    dom: 'Bfrtip',
+                    buttons: ['copy', 'excel', 'pdf'],
+                    order: [[0, 'asc']]
+                });
+            }
+            
+            // Update charts
+            updateCharts(data);
+        })
+        .catch(error => {
+            console.error('Error loading storage data:', error);
+            showToast('Failed to load storage data', 'danger');
+        })
+        .finally(() => {
+            stopLoadingAnimation();
+        });
+}
+
+$(document).ready(function() {
+    // Initial load
+    if (checkAzureLogin()) {
+        loadData();
+    }
+    
+    // Refresh button
+    $('#refreshBtn').click(function() {
+        loadData();
+    });
+});
+</script>
+{% endblock %}

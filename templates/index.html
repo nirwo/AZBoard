@@ -130,9 +130,12 @@
         <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-4">
                 <h5 class="card-title mb-0">Azure Instances</h5>
-                <button class="btn btn-primary refresh-btn" id="refreshBtn">
-                    <i class="fas fa-sync-alt"></i> Refresh
-                </button>
+                <div>
+                    <span class="me-3">Total Monthly Cost: <strong class="total-cost">$0.00</strong></span>
+                    <button class="btn btn-primary refresh-btn" id="refreshBtn">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
             </div>
             <div class="table-responsive">
                 <table id="instancesTable" class="table table-striped">
@@ -142,8 +145,11 @@
                             <th>Resource Group</th>
                             <th>Status</th>
                             <th>Size</th>
+                            <th>Network</th>
+                            <th>Storage</th>
                             <th>Location</th>
-                            <th>Tags</th>
+                            <th>Monthly Cost</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody></tbody>
@@ -176,6 +182,34 @@ function updateActiveFilters() {
     });
 }
 
+function formatNetworkInfo(nics) {
+    if (!nics || !nics.length) return 'No network interfaces';
+    return nics.map(nic => `
+        <div class="small mb-2">
+            <strong>${nic.name}</strong><br>
+            Private IP: ${nic.private_ip || 'N/A'}<br>
+            Public IP: ${nic.public_ip || 'N/A'}<br>
+            Subnet: ${nic.subnet || 'N/A'}
+        </div>
+    `).join('');
+}
+
+function formatStorageInfo(disks) {
+    if (!disks || !disks.length) return 'No disks';
+    return disks.map(disk => `
+        <div class="small mb-2">
+            <strong>${disk.name}</strong><br>
+            Size: ${disk.size_gb}GB<br>
+            Type: ${disk.type}<br>
+            ${disk.is_os_disk ? '<span class="badge bg-info">OS Disk</span>' : '<span class="badge bg-secondary">Data Disk</span>'}
+        </div>
+    `).join('');
+}
+
+function formatCost(cost) {
+    return `$${cost.toFixed(2)}`;
+}
+
 function loadData() {
     startLoadingAnimation();
     
@@ -200,6 +234,7 @@ function loadData() {
             $('.resource-groups').text(
                 new Set(data.instances.map(i => i.resourceGroup)).size
             );
+            $('.total-cost').text(formatCost(data.total_monthly_cost));
             
             // Update filters
             const resourceGroups = [...new Set(data.instances.map(i => i.resourceGroup))];
@@ -235,13 +270,30 @@ function loadData() {
                             }
                         },
                         { data: 'size' },
+                        {
+                            data: 'nics',
+                            render: formatNetworkInfo
+                        },
+                        {
+                            data: 'disks',
+                            render: formatStorageInfo
+                        },
                         { data: 'location' },
                         {
-                            data: 'tags',
+                            data: 'monthly_cost',
+                            render: formatCost
+                        },
+                        {
+                            data: null,
                             render: function(data) {
-                                return Object.entries(data || {})
-                                    .map(([key, value]) => `<span class="tag-badge">${key}: ${value}</span>`)
-                                    .join(' ');
+                                const status = data.status.toLowerCase();
+                                const startBtn = `<button class="btn btn-sm btn-success me-1" onclick="startVM('${data.name}', '${data.resourceGroup}')"><i class="fas fa-play"></i></button>`;
+                                const stopBtn = `<button class="btn btn-sm btn-danger me-1" onclick="stopVM('${data.name}', '${data.resourceGroup}')"><i class="fas fa-stop"></i></button>`;
+                                const restartBtn = `<button class="btn btn-sm btn-warning" onclick="restartVM('${data.name}', '${data.resourceGroup}')"><i class="fas fa-sync"></i></button>`;
+                                
+                                return `<div class="btn-group">
+                                    ${status.includes('running') ? stopBtn + restartBtn : startBtn}
+                                </div>`;
                             }
                         }
                     ],
@@ -258,6 +310,58 @@ function loadData() {
         })
         .finally(() => {
             stopLoadingAnimation();
+        });
+}
+
+// VM control functions
+function startVM(name, resourceGroup) {
+    if (!confirm(`Are you sure you want to start VM "${name}"?`)) return;
+    
+    $.post('/api/vm/start', { name, resourceGroup })
+        .then(response => {
+            if (response.error) {
+                showToast(response.error, 'danger');
+            } else {
+                showToast(`Starting VM "${name}"...`, 'success');
+                setTimeout(loadData, 5000);
+            }
+        })
+        .catch(error => {
+            showToast('Failed to start VM', 'danger');
+        });
+}
+
+function stopVM(name, resourceGroup) {
+    if (!confirm(`Are you sure you want to stop VM "${name}"?`)) return;
+    
+    $.post('/api/vm/stop', { name, resourceGroup })
+        .then(response => {
+            if (response.error) {
+                showToast(response.error, 'danger');
+            } else {
+                showToast(`Stopping VM "${name}"...`, 'success');
+                setTimeout(loadData, 5000);
+            }
+        })
+        .catch(error => {
+            showToast('Failed to stop VM', 'danger');
+        });
+}
+
+function restartVM(name, resourceGroup) {
+    if (!confirm(`Are you sure you want to restart VM "${name}"?`)) return;
+    
+    $.post('/api/vm/restart', { name, resourceGroup })
+        .then(response => {
+            if (response.error) {
+                showToast(response.error, 'danger');
+            } else {
+                showToast(`Restarting VM "${name}"...`, 'success');
+                setTimeout(loadData, 5000);
+            }
+        })
+        .catch(error => {
+            showToast('Failed to restart VM', 'danger');
         });
 }
 
