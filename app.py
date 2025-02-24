@@ -195,7 +195,14 @@ def fetch_and_cache_vms(compute_client, subscription_id):
 
 @app.route('/')
 def index():
-    return send_from_directory('../frontend/dist', 'index.html')
+    try:
+        subscriptions = get_subscriptions()
+        if not subscriptions:
+            app.logger.warning("No subscriptions found")
+        return render_template('index.html', subscriptions=subscriptions)
+    except Exception as e:
+        app.logger.error(f"Error in index route: {str(e)}")
+        return render_template('index.html', subscriptions=[])
 
 @app.route('/<path:path>')
 def serve_static(path):
