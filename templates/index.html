@@ -158,7 +158,7 @@
                 <h5 class="card-title mb-0">Azure Instances</h5>
                 <div>
                     <span class="me-3">Total Monthly Cost: <strong class="total-cost">$0.00</strong></span>
-                    <button class="btn btn-primary refresh-btn" id="refreshBtn">
+                    <button class="btn btn-primary refresh-btn" id="refreshButton">
                         <i class="fas fa-sync-alt"></i> Refresh
                     </button>
                 </div>
@@ -194,166 +194,119 @@
     </div>
 
     <div id="errorAlert" class="alert alert-danger" role="alert"></div>
-
-    <nav aria-label="VM pagination">
-        <ul id="pagination" class="pagination justify-content-center"></ul>
-    </nav>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let table;
-let currentPage = 1;
-let totalPages = 1;
-const perPage = 50;
+let instancesTable = null;
 
-function loadVMs(page = 1) {
+function loadVMs(forceRefresh = false) {
     showLoading();
     
-    fetch(`/api/vms?page=${page}&per_page=${perPage}`)
-        .then(response => response.json())
-        .then(data => {
-            currentPage = data.page;
-            totalPages = data.total_pages;
-            
-            // Update table
-            if (table) {
-                table.clear();
-                table.rows.add(data.vms);
-                table.draw();
-            } else {
-                initializeTable(data.vms);
+    $.ajax({
+        url: '/api/vms',
+        data: {
+            force_refresh: forceRefresh,
+            resource_group: $('#resourceGroupFilter').val(),
+            status: $('#statusFilter').val(),
+            vm_size: $('#vmSizeFilter').val()
+        },
+        success: function(response) {
+            if (response.error) {
+                showError(response.error);
+                return;
             }
             
-            // Update pagination
-            updatePagination();
-            
-            // Load details for visible VMs
-            loadVisibleVMDetails();
-            
-            hideLoading();
-        })
-        .catch(error => {
-            console.error('Error loading VMs:', error);
-            showError('Failed to load VM list');
-            hideLoading();
-        });
-}
+            if (instancesTable) {
+                instancesTable.destroy();
+            }
 
-function updatePagination() {
-    const pagination = document.getElementById('pagination');
-    let html = '';
-    
-    // Previous button
-    html += `<li class="page-item ${currentPage === 1 ? 'disabled' : ''}">
-        <a class="page-link" href="#" data-page="${currentPage - 1}">Previous</a>
-    </li>`;
-    
-    // Page numbers
-    for (let i = Math.max(1, currentPage - 2); i <= Math.min(totalPages, currentPage + 2); i++) {
-        html += `<li class="page-item ${i === currentPage ? 'active' : ''}">
-            <a class="page-link" href="#" data-page="${i}">${i}</a>
-        </li>`;
-    }
-    
-    // Next button
-    html += `<li class="page-item ${currentPage === totalPages ? 'disabled' : ''}">
-        <a class="page-link" href="#" data-page="${currentPage + 1}">Next</a>
-    </li>`;
-    
-    pagination.innerHTML = html;
-}
+            // Update stats
+            $('.total-instances').text(response.total);
+            $('.running-instances').text(response.vms.filter(vm => vm.powerState === 'running').length);
+            $('.resource-groups').text(new Set(response.vms.map(vm => vm.resourceGroup)).size);
 
-function loadVisibleVMDetails() {
-    const visibleRows = table.rows({ page: 'current' }).data();
-    const vmBatch = [];
-    
-    visibleRows.each(vm => {
-        vmBatch.push(`${vm.resourceGroup}/${vm.name}`);
-    });
-    
-    if (vmBatch.length === 0) return;
-    
-    const queryString = vmBatch.map(vm => `vms[]=${encodeURIComponent(vm)}`).join('&');
-    fetch(`/api/vms/batch?${queryString}`)
-        .then(response => response.json())
-        .then(data => {
-            // Update VM details in the table
-            visibleRows.each(vm => {
-                const vmKey = `${vm.resourceGroup}/${vm.name}`;
-                const details = data[vmKey];
-                if (details) {
-                    // Update network info
-                    if (details.network) {
-                        const privateIps = details.network.privateIpAddresses || [];
-                        const publicIps = details.network.publicIpAddresses || [];
-                        vm.privateIp = privateIps[0] || 'Not configured';
-                        vm.publicIp = publicIps[0]?.ipAddress || 'Not configured';
+            // Initialize DataTable
+            instancesTable = $('#instancesTable').DataTable({
+                data: response.vms,
+                pageLength: 10,
+                lengthMenu: [[10, 25, 50, -1], [10, 25, 50, "All"]],
+                responsive: true,
+                dom: '<"row"<"col-sm-12 col-md-6"l><"col-sm-12 col-md-6"f>>' +
+                     '<"row"<"col-sm-12"tr>>' +
+                     '<"row"<"col-sm-12 col-md-5"i><"col-sm-12 col-md-7"p>>',
+                language: {
+                    search: "Search VMs:",
+                    lengthMenu: "Show _MENU_ VMs per page",
+                    info: "Showing _START_ to _END_ of _TOTAL_ VMs"
+                },
+                columns: [
+                    { data: 'name' },
+                    { data: 'resourceGroup' },
+                    { 
+                        data: 'powerState',
+                        render: function(data) {
+                            const status = data || 'unknown';
+                            const statusClass = {
+                                'running': 'success',
+                                'stopped': 'warning',
+                                'deallocated': 'danger',
+                                'unknown': 'secondary'
+                            }[status] || 'secondary';
+                            
+                            return `<span class="badge bg-${statusClass}">${status}</span>`;
+                        }
+                    },
+                    { data: 'vmSize' },
+                    { 
+                        data: null,
+                        render: function(data) {
+                            return `<button class="btn btn-sm btn-outline-primary view-network" data-vm="${data.name}" data-rg="${data.resourceGroup}">
+                                View Network
+                            </button>`;
+                        }
+                    },
+                    { 
+                        data: null,
+                        render: function(data) {
+                            return `<button class="btn btn-sm btn-outline-primary view-storage" data-vm="${data.name}" data-rg="${data.resourceGroup}">
+                                View Storage
+                            </button>`;
+                        }
+                    },
+                    { data: 'location' },
+                    { 
+                        data: null,
+                        render: function(data) {
+                            return `$${data.monthlyCost || 0}`;
+                        }
+                    },
+                    {
+                        data: null,
+                        render: function(data) {
+                            return `<div class="btn-group">
+                                <button class="btn btn-sm btn-primary start-stop-vm" data-vm="${data.name}" data-rg="${data.resourceGroup}" data-action="${data.powerState === 'running' ? 'stop' : 'start'}">
+                                    ${data.powerState === 'running' ? 'Stop' : 'Start'}
+                                </button>
+                                <button class="btn btn-sm btn-info view-details" data-vm="${data.name}" data-rg="${data.resourceGroup}">
+                                    Details
+                                </button>
+                            </div>`;
+                        }
                     }
-                    
-                    // Update other details as needed
-                    if (details.vm) {
-                        vm.osType = details.vm.osType;
-                        vm.powerState = details.vm.powerState;
-                    }
-                }
+                ]
             });
-            
-            // Redraw the table
-            table.draw(false);
-        })
-        .catch(error => {
-            console.error('Error loading VM details:', error);
-        });
-}
 
-function initializeTable(data) {
-    table = $('#instancesTable').DataTable({
-        data: data,
-        columns: [
-            { data: 'name', title: 'Name' },
-            { data: 'resourceGroup', title: 'Resource Group' },
-            { data: 'location', title: 'Location' },
-            { data: 'vmSize', title: 'Size' },
-            { data: 'powerState', title: 'State' },
-            { 
-                data: 'privateIp',
-                title: 'Private IP',
-                defaultContent: 'Loading...'
-            },
-            { 
-                data: 'publicIp',
-                title: 'Public IP',
-                defaultContent: 'Loading...'
-            }
-        ],
-        pageLength: perPage,
-        dom: '<"row"<"col-sm-12 col-md-6"l><"col-sm-12 col-md-6"f>>' +
-             '<"row"<"col-sm-12"tr>>' +
-             '<"row"<"col-sm-12 col-md-5"i><"col-sm-12 col-md-7"p>>',
-        language: {
-            processing: "Loading...",
-            search: "Filter:",
-            lengthMenu: "Show _MENU_ entries",
-            info: "Showing _START_ to _END_ of _TOTAL_ entries",
-            infoEmpty: "Showing 0 to 0 of 0 entries",
-            infoFiltered: "(filtered from _MAX_ total entries)",
-            paginate: {
-                first: "First",
-                last: "Last",
-                next: "Next",
-                previous: "Previous"
-            }
-        }
-    });
-    
-    // Handle pagination clicks
-    $('#pagination').on('click', 'a.page-link', function(e) {
-        e.preventDefault();
-        const page = $(this).data('page');
-        if (page >= 1 && page <= totalPages) {
-            loadVMs(page);
+            // Calculate total cost
+            const totalCost = response.vms.reduce((sum, vm) => sum + (vm.monthlyCost || 0), 0);
+            $('.total-cost').text(`$${totalCost.toFixed(2)}`);
+        },
+        error: function(xhr, status, error) {
+            showError('Failed to load VMs: ' + error);
+        },
+        complete: function() {
+            hideLoading();
         }
     });
 }
@@ -367,22 +320,27 @@ function hideLoading() {
 }
 
 function showError(message) {
-    $('#errorAlert').text(message).show();
-    setTimeout(() => $('#errorAlert').fadeOut(), 5000);
+    const alert = $('#errorAlert');
+    alert.text(message).fadeIn();
+    setTimeout(() => alert.fadeOut(), 5000);
 }
 
 $(document).ready(function() {
     loadVMs();
     
     // Refresh button
-    $('#refreshBtn').click(function() {
-        loadVMs(currentPage);
+    $('#refreshButton').click(function() {
+        loadVMs(true);
     });
     
-    // VM details
-    $(document).on('click', '#instancesTable tbody tr', function() {
-        const vm = table.row(this).data();
-        updateVMDetails(vm);
+    // Filter buttons
+    $('#applyFilters').click(function() {
+        loadVMs();
+    });
+    
+    $('#clearFilters').click(function() {
+        $('select.filter').val('');
+        loadVMs();
     });
 });
 </script>

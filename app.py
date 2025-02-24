@@ -5,13 +5,17 @@ import json
 import subprocess
 import logging
 from datetime import datetime, timedelta
+import random
+import sys
+import platform
 
 app = Flask(__name__)
 
-# Configure logging
-if not os.path.exists('logs'):
-    os.makedirs('logs')
-file_handler = RotatingFileHandler('logs/azure_dashboard.log', maxBytes=10240, backupCount=10)
+# Configure logging with Windows-compatible paths
+log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+if not os.path.exists(log_dir):
+    os.makedirs(log_dir)
+file_handler = RotatingFileHandler(os.path.join(log_dir, 'azure_dashboard.log'), maxBytes=10240, backupCount=10)
 file_handler.setFormatter(logging.Formatter(
     '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
 ))
@@ -20,9 +24,73 @@ app.logger.addHandler(file_handler)
 app.logger.setLevel(logging.INFO)
 app.logger.info('Azure Dashboard startup')
 
-# Cache configuration
-CACHE_DIR = 'cache'
+# Cache configuration with Windows-compatible paths
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache')
 CACHE_DURATION = timedelta(minutes=5)  # Cache data for 5 minutes
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+VM_LIST_CACHE_FILE = os.path.join(CACHE_DIR, 'vm_list.cache')
+
+def get_vm_list_from_azure(subscription=None):
+    """Get list of VMs directly from Azure"""
+    cmd = ['az', 'vm', 'list']
+    if subscription:
+        cmd.extend(['--subscription', subscription])
+    cmd.extend(['--query', '[].{name: name, resourceGroup: resourceGroup, location: location, powerState: powerState, vmSize: hardwareProfile.vmSize, tags: tags}'])
+    cmd.extend(['--output', 'json'])
+    
+    # Use shell=True on Windows to find az in PATH
+    shell = platform.system() == 'Windows'
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
+        if result.returncode != 0:
+            app.logger.error(f"Failed to get VM list: {result.stderr}")
+            raise Exception(f"Failed to get VM list: {result.stderr}")
+            
+        return json.loads(result.stdout)
+    except FileNotFoundError:
+        app.logger.error("Azure CLI (az) not found. Please install Azure CLI.")
+        raise Exception("Azure CLI (az) not found. Please install Azure CLI.")
+
+def load_vm_list_from_cache():
+    """Load VM list from cache if it exists and is not expired"""
+    try:
+        if os.path.exists(VM_LIST_CACHE_FILE):
+            with open(VM_LIST_CACHE_FILE, 'r') as f:
+                cached_data = json.load(f)
+                cache_time = datetime.fromisoformat(cached_data['cache_time'])
+                
+                # Check if cache is still valid
+                if datetime.now() - cache_time < CACHE_DURATION:
+                    app.logger.info("Using cached VM list")
+                    return cached_data['data'], cached_data.get('vm_states', {})
+    except Exception as e:
+        app.logger.error(f"Error reading VM list cache: {str(e)}")
+    return None, {}
+
+def save_vm_list_to_cache(vms, vm_states):
+    """Save VM list to cache with state tracking"""
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    
+    try:
+        cache_data = {
+            'cache_time': datetime.now().isoformat(),
+            'data': vms,
+            'vm_states': vm_states
+        }
+        with open(VM_LIST_CACHE_FILE, 'w') as f:
+            json.dump(cache_data, f)
+        app.logger.info("Cached VM list")
+    except Exception as e:
+        app.logger.error(f"Error writing VM list cache: {str(e)}")
+
+def get_vm_state_hash(vm):
+    """Generate a hash of VM state for change detection"""
+    # Convert the VM state to a sorted JSON string to ensure consistent hashing
+    vm_json = json.dumps(vm, sort_keys=True)
+    # Return the string directly - it's already JSON-serializable
+    return vm_json
 
 def get_cache_file_path(vm_name, resource_group):
     """Generate cache file path for a VM"""
@@ -72,25 +140,43 @@ def kpi():
 
 @app.route('/api/vms')
 def get_vms():
-    """Get paginated list of VMs"""
+    """Get paginated list of VMs with change detection"""
     try:
         page = request.args.get('page', 1, type=int)
         per_page = request.args.get('per_page', 50, type=int)
         subscription = request.args.get('subscription', '')
+        force_refresh = request.args.get('force_refresh', '').lower() == 'true'
         
-        # Get list of VMs with minimal info
-        cmd = ['az', 'vm', 'list']
-        if subscription:
-            cmd.extend(['--subscription', subscription])
-        cmd.extend(['--query', '[].{name: name, resourceGroup: resourceGroup, location: location, powerState: powerState, vmSize: hardwareProfile.vmSize}'])
-        cmd.extend(['--output', 'json'])
+        # Try to load from cache first
+        cached_vms, vm_states = load_vm_list_from_cache() if not force_refresh else (None, {})
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            app.logger.error(f"Failed to get VM list: {result.stderr}")
-            return jsonify({'error': 'Failed to get VM list', 'details': result.stderr}), 500
-            
-        vms = json.loads(result.stdout)
+        if cached_vms is None:
+            # Cache miss or force refresh, get fresh data from Azure
+            vms = get_vm_list_from_azure(subscription)
+            new_vm_states = {vm['name']: get_vm_state_hash(vm) for vm in vms}
+            save_vm_list_to_cache(vms, new_vm_states)
+        else:
+            # Cache hit, check for changes
+            try:
+                current_vms = get_vm_list_from_azure(subscription)
+                new_vm_states = {vm['name']: get_vm_state_hash(vm) for vm in current_vms}
+                
+                # Detect changes
+                changed_vms = []
+                for vm in current_vms:
+                    name = vm['name']
+                    if name not in vm_states or vm_states[name] != new_vm_states[name]:
+                        changed_vms.append(name)
+                
+                if changed_vms:
+                    app.logger.info(f"Detected changes in VMs: {changed_vms}")
+                    vms = current_vms
+                    save_vm_list_to_cache(vms, new_vm_states)
+                else:
+                    vms = cached_vms
+            except Exception as e:
+                app.logger.warning(f"Failed to check for VM changes: {str(e)}")
+                vms = cached_vms
         
         # Calculate pagination
         total = len(vms)
@@ -106,11 +192,8 @@ def get_vms():
             'total_pages': (total + per_page - 1) // per_page
         })
         
-    except json.JSONDecodeError as e:
-        app.logger.error(f"JSON decode error: {str(e)}")
-        return jsonify({'error': 'Invalid JSON response from Azure CLI'}), 500
     except Exception as e:
-        app.logger.error(f"Error getting VM list: {str(e)}")
+        app.logger.error(f"Error in get_vms: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/vms/batch')
@@ -141,7 +224,8 @@ def get_vms_batch():
                 cmd = ['az', 'vm', 'show', '--name', vm_name, '--resource-group', resource_group, 
                       '--query', '{name: name, resourceGroup: resourceGroup, location: location, vmSize: hardwareProfile.vmSize, osType: storageProfile.osDisk.osType, powerState: powerState}', 
                       '--output', 'json']
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                shell = platform.system() == 'Windows'
+                result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
                 
                 if result.returncode == 0:
                     vm_data = json.loads(result.stdout)
@@ -149,7 +233,7 @@ def get_vms_batch():
                     
                     # Get IP addresses
                     ip_cmd = ['az', 'vm', 'list-ip-addresses', '--name', vm_name, '--resource-group', resource_group, '--output', 'json']
-                    ip_result = subprocess.run(ip_cmd, capture_output=True, text=True)
+                    ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, shell=shell)
                     
                     if ip_result.returncode == 0:
                         ip_data = json.loads(ip_result.stdout)
@@ -176,7 +260,8 @@ def get_vms_batch():
 def check_login():
     try:
         cmd = "az account show"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        shell = platform.system() == 'Windows'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             return jsonify({"status": "logged_in"})
         else:
@@ -199,96 +284,69 @@ def refresh_data():
 
 @app.route('/api/kpi-data')
 def get_kpi_data():
+    """Get KPI data including cost analysis and resource utilization"""
     try:
-        # Get instance data
-        instances = get_azure_instances()
-        if "error" in instances:
-            return jsonify(instances)
-
-        # Process data for KPI charts
-        resource_groups = {}
-        vm_sizes = {}
-        status_counts = {"running": 0, "stopped": 0, "other": 0}
+        # Get all VMs
+        vms = get_vm_list_from_azure()
         
-        for instance in instances["instances"]:
-            # Resource Group stats
-            rg = instance["resourceGroup"]
-            resource_groups[rg] = resource_groups.get(rg, 0) + 1
+        # Calculate costs and resource usage
+        total_cost = 0
+        cpu_usage = []
+        memory_usage = []
+        disk_usage = []
+        network_in = []
+        network_out = []
+        
+        for vm in vms:
+            # Get VM details including metrics
+            vm_details = get_vm_details(vm['name'], vm['resourceGroup'])
             
-            # VM Size stats
-            size = instance["size"]
-            vm_sizes[size] = vm_sizes.get(size, 0) + 1
+            # Calculate cost
+            monthly_cost = calculate_vm_cost(vm['vmSize'], vm['location'])
+            total_cost += monthly_cost
             
-            # Status stats
-            status = instance["status"].lower()
-            if "running" in status:
-                status_counts["running"] += 1
-            elif "stopped" in status or "deallocated" in status:
-                status_counts["stopped"] += 1
-            else:
-                status_counts["other"] += 1
-
-        # Mock data for demonstration
-        kpi_data = {
-            # Cost Analysis
-            "costLabels": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
-            "costData": [1200, 1350, 1100, 1400, 1300, 1500],
+            # Get resource metrics (simulated for now)
+            cpu = random.uniform(0, 100)
+            memory = random.uniform(0, 100)
+            disk = random.uniform(0, 100)
+            net_in = random.uniform(0, 1000)
+            net_out = random.uniform(0, 1000)
             
-            # Resource Utilization
-            "utilizationLabels": list(resource_groups.keys()),
-            "cpuData": [75, 60, 85, 70, 90],
-            "memoryData": [65, 70, 75, 80, 85],
+            cpu_usage.append(cpu)
+            memory_usage.append(memory)
+            disk_usage.append(disk)
+            network_in.append(net_in)
+            network_out.append(net_out)
             
-            # Resource Group Distribution
-            "resourceGroups": list(resource_groups.keys()),
-            "resourceGroupCounts": list(resource_groups.values()),
-            
-            # VM Size Distribution
-            "vmSizes": list(vm_sizes.keys()),
-            "vmSizeCounts": list(vm_sizes.values()),
-            
-            # Status Distribution
-            "statusLabels": ["Running", "Stopped", "Other"],
-            "statusCounts": [
-                status_counts["running"],
-                status_counts["stopped"],
-                status_counts["other"]
-            ],
-            
-            # Performance Metrics
-            "metrics": [
+        # Prepare response data
+        response = {
+            'costLabels': [vm['name'] for vm in vms],
+            'costData': [calculate_vm_cost(vm['vmSize'], vm['location']) for vm in vms],
+            'utilizationLabels': [vm['name'] for vm in vms],
+            'cpuData': cpu_usage,
+            'memoryData': memory_usage,
+            'diskData': disk_usage,
+            'networkInData': network_in,
+            'networkOutData': network_out,
+            'metrics': [
                 {
-                    "name": "Avg CPU Utilization",
-                    "current": "75%",
-                    "target": "80%",
-                    "status": "good",
-                    "trend": "up",
-                    "trendValue": 5
-                },
-                {
-                    "name": "Avg Memory Usage",
-                    "current": "65%",
-                    "target": "70%",
-                    "status": "good",
-                    "trend": "up",
-                    "trendValue": 3
-                },
-                {
-                    "name": "Running Instances",
-                    "current": str(status_counts["running"]),
-                    "target": str(len(instances["instances"])),
-                    "status": "warning" if status_counts["stopped"] > 0 else "good",
-                    "trend": "up" if status_counts["running"] > status_counts["stopped"] else "down",
-                    "trendValue": int((status_counts["running"] / len(instances["instances"])) * 100)
+                    'name': vm['name'],
+                    'cpu': cpu_usage[i],
+                    'memory': memory_usage[i],
+                    'disk': disk_usage[i],
+                    'networkIn': network_in[i],
+                    'networkOut': network_out[i],
+                    'cost': calculate_vm_cost(vm['vmSize'], vm['location'])
                 }
+                for i, vm in enumerate(vms)
             ]
         }
         
-        return jsonify(kpi_data)
+        return jsonify(response)
         
     except Exception as e:
-        app.logger.error(f"Error generating KPI data: {str(e)}")
-        return jsonify({"error": "Failed to generate KPI data"}), 500
+        app.logger.error(f"Error getting KPI data: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/instances')
 def get_instances():
@@ -296,7 +354,7 @@ def get_instances():
         instances = get_azure_instances()
         if "error" in instances:
             return jsonify(instances)
-            
+
         # Add additional filtering capabilities
         filter_type = request.args.get('filter', 'all')
         resource_group = request.args.get('resource_group')
@@ -334,7 +392,8 @@ def get_storage_data():
     try:
         # Get storage accounts
         cmd = "az storage account list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        shell = platform.system() == 'Windows'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             storage_accounts = json.loads(result.stdout)
             return jsonify({
@@ -352,7 +411,8 @@ def get_network_data():
     try:
         # Get network resources
         cmd = "az network vnet list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        shell = platform.system() == 'Windows'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             vnets = json.loads(result.stdout)
         else:
@@ -360,7 +420,7 @@ def get_network_data():
             return jsonify({"error": "Failed to get VNets"}), 500
         
         cmd = "az network public-ip list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             public_ips = json.loads(result.stdout)
         else:
@@ -368,7 +428,7 @@ def get_network_data():
             return jsonify({"error": "Failed to get public IPs"}), 500
         
         cmd = "az network nsg list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             nsgs = json.loads(result.stdout)
         else:
@@ -391,8 +451,9 @@ def get_azure_instances():
         
         # Get VM list with all details
         vm_command = "az vm list --show-details -d --query '[].{name:name,resourceGroup:resourceGroup,powerState:powerState,size:hardwareProfile.vmSize,location:location,osType:storageProfile.osDisk.osType}'"
+        shell = platform.system() == 'Windows'
         app.logger.info(f"Running VM list command: {vm_command}")
-        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
+        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True, shell=shell)
         
         if vm_result.returncode != 0:
             app.logger.error(f"Failed to fetch VM list: {vm_result.stderr}")
@@ -457,7 +518,8 @@ def get_vm_details(vm_name, resource_group):
         
         # Get VM details including IP addresses
         vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} --show-details -d"
-        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
+        shell = platform.system() == 'Windows'
+        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True, shell=shell)
         
         if vm_result.returncode != 0:
             app.logger.error(f"Failed to get VM details: {vm_result.stderr}")
@@ -467,7 +529,7 @@ def get_vm_details(vm_name, resource_group):
         
         # Get IP addresses using the simpler command
         ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
-        ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True)
+        ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True, shell=shell)
         
         nics = []
         if ip_result.returncode == 0:
@@ -489,7 +551,7 @@ def get_vm_details(vm_name, resource_group):
                     
                     # Get NIC details for subnet information
                     nic_command = f"az network nic show -n {nic_name} -g {nic_resource_group}"
-                    nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True)
+                    nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True, shell=shell)
                     
                     if nic_result.returncode == 0:
                         nic_data = json.loads(nic_result.stdout)
