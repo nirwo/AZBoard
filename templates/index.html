@@ -19,21 +19,6 @@
         margin-bottom: 0.5rem;
     }
 
-    .filter-badge {
-        background: var(--primary-color);
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        margin: 0.25rem;
-        display: inline-flex;
-        align-items: center;
-    }
-
-    .filter-badge .close {
-        margin-left: 0.5rem;
-        cursor: pointer;
-    }
-
     .stats-card {
         background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
         color: white;
@@ -41,7 +26,7 @@
         overflow: hidden;
         position: relative;
     }
-    
+
     #loadingOverlay {
         position: fixed;
         top: 0;
@@ -67,36 +52,43 @@
         z-index: 1000;
         display: none;
     }
+
+    .network-info, .storage-info {
+        font-size: 0.9em;
+        margin-top: 0.5em;
+    }
+
+    .network-info span, .storage-info span {
+        display: inline-block;
+        margin-right: 1em;
+        white-space: nowrap;
+    }
+
+    .badge {
+        font-size: 0.8em;
+        padding: 0.3em 0.6em;
+        margin-right: 0.3em;
+    }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="container-fluid py-4">
-    <!-- Stats Cards -->
-    <div class="row mb-4">
-        <div class="col-md-4">
-            <div class="card stats-card" data-filter="all">
-                <div class="card-body">
-                    <h5 class="card-title">Total Instances</h5>
-                    <h2 class="total-instances">-</h2>
-                </div>
-            </div>
+<div class="container-fluid mt-4">
+    <div class="row mb-3">
+        <div class="col">
+            <select id="subscriptionSelect" class="form-select">
+                {% for sub in subscriptions %}
+                    <option value="{{ sub.id }}">{{ sub.display_name }}</option>
+                {% endfor %}
+            </select>
         </div>
-        <div class="col-md-4">
-            <div class="card stats-card" data-filter="running">
-                <div class="card-body">
-                    <h5 class="card-title">Running Instances</h5>
-                    <h2 class="running-instances">-</h2>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-4">
-            <div class="card stats-card" data-filter="resource-groups">
-                <div class="card-body">
-                    <h5 class="card-title">Resource Groups</h5>
-                    <h2 class="resource-groups">-</h2>
-                </div>
-            </div>
+        <div class="col">
+            <button id="refreshButton" class="btn btn-primary">
+                <i class="fas fa-sync-alt"></i> Refresh
+            </button>
+            <button id="logoutButton" class="btn btn-danger">
+                <i class="fas fa-sign-out-alt"></i> Logout
+            </button>
         </div>
     </div>
 
@@ -158,9 +150,6 @@
                 <h5 class="card-title mb-0">Azure Instances</h5>
                 <div>
                     <span class="me-3">Total Monthly Cost: <strong class="total-cost">$0.00</strong></span>
-                    <button class="btn btn-primary refresh-btn" id="refreshButton">
-                        <i class="fas fa-sync-alt"></i> Refresh
-                    </button>
                 </div>
             </div>
             <div class="table-responsive">
@@ -169,16 +158,16 @@
                         <tr>
                             <th>Name</th>
                             <th>Resource Group</th>
-                            <th>Status</th>
+                            <th>Location</th>
                             <th>Size</th>
+                            <th>Status</th>
                             <th>Network</th>
                             <th>Storage</th>
-                            <th>Location</th>
                             <th>Monthly Cost</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
-                    <tbody></tbody>
+                    <tbody id="vmTable"></tbody>
                 </table>
             </div>
         </div>
@@ -199,149 +188,85 @@
 
 {% block scripts %}
 <script>
-let instancesTable = null;
-
-function loadVMs(forceRefresh = false) {
-    showLoading();
-    
-    $.ajax({
-        url: '/api/vms',
-        data: {
-            force_refresh: forceRefresh,
-            resource_group: $('#resourceGroupFilter').val(),
-            status: $('#statusFilter').val(),
-            vm_size: $('#vmSizeFilter').val()
-        },
-        success: function(response) {
-            if (response.error) {
-                showError(response.error);
-                return;
-            }
-            
-            if (instancesTable) {
-                instancesTable.destroy();
-            }
-
-            // Update stats
-            $('.total-instances').text(response.total);
-            $('.running-instances').text(response.vms.filter(vm => vm.powerState === 'running').length);
-            $('.resource-groups').text(new Set(response.vms.map(vm => vm.resourceGroup)).size);
-
-            // Initialize DataTable
-            instancesTable = $('#instancesTable').DataTable({
-                data: response.vms,
-                pageLength: 10,
-                lengthMenu: [[10, 25, 50, -1], [10, 25, 50, "All"]],
-                responsive: true,
-                dom: '<"row"<"col-sm-12 col-md-6"l><"col-sm-12 col-md-6"f>>' +
-                     '<"row"<"col-sm-12"tr>>' +
-                     '<"row"<"col-sm-12 col-md-5"i><"col-sm-12 col-md-7"p>>',
-                language: {
-                    search: "Search VMs:",
-                    lengthMenu: "Show _MENU_ VMs per page",
-                    info: "Showing _START_ to _END_ of _TOTAL_ VMs"
+    $(document).ready(function() {
+        let currentSubscription = $('#subscriptionSelect').val();
+        
+        function loadVMs(forceRefresh = false) {
+            $.ajax({
+                url: '/api/vms',
+                data: {
+                    force_refresh: forceRefresh,
+                    subscription_id: currentSubscription,
+                    resource_group: $('#resourceGroupFilter').val(),
+                    status: $('#statusFilter').val(),
+                    vm_size: $('#vmSizeFilter').val()
                 },
-                columns: [
-                    { data: 'name' },
-                    { data: 'resourceGroup' },
-                    { 
-                        data: 'powerState',
-                        render: function(data) {
-                            const status = data || 'unknown';
-                            const statusClass = {
-                                'running': 'success',
-                                'stopped': 'warning',
-                                'deallocated': 'danger',
-                                'unknown': 'secondary'
-                            }[status] || 'secondary';
-                            
-                            return `<span class="badge bg-${statusClass}">${status}</span>`;
-                        }
-                    },
-                    { data: 'vmSize' },
-                    { 
-                        data: null,
-                        render: function(data) {
-                            return `<button class="btn btn-sm btn-outline-primary view-network" data-vm="${data.name}" data-rg="${data.resourceGroup}">
-                                View Network
-                            </button>`;
-                        }
-                    },
-                    { 
-                        data: null,
-                        render: function(data) {
-                            return `<button class="btn btn-sm btn-outline-primary view-storage" data-vm="${data.name}" data-rg="${data.resourceGroup}">
-                                View Storage
-                            </button>`;
-                        }
-                    },
-                    { data: 'location' },
-                    { 
-                        data: null,
-                        render: function(data) {
-                            return `$${data.monthlyCost || 0}`;
-                        }
-                    },
-                    {
-                        data: null,
-                        render: function(data) {
-                            return `<div class="btn-group">
-                                <button class="btn btn-sm btn-primary start-stop-vm" data-vm="${data.name}" data-rg="${data.resourceGroup}" data-action="${data.powerState === 'running' ? 'stop' : 'start'}">
-                                    ${data.powerState === 'running' ? 'Stop' : 'Start'}
-                                </button>
-                                <button class="btn btn-sm btn-info view-details" data-vm="${data.name}" data-rg="${data.resourceGroup}">
-                                    Details
-                                </button>
-                            </div>`;
-                        }
-                    }
-                ]
+                success: function(data) {
+                    let tableBody = $('#vmTable');
+                    tableBody.empty();
+                    
+                    data.forEach(function(vm) {
+                        let networkInfo = vm.nics.map(nic => 
+                            `Private IP: ${nic.private_ip}<br>` +
+                            `Public IP: ${nic.public_ip || 'None'}<br>` +
+                            `Subnet: ${nic.subnet}`
+                        ).join('<hr>');
+                        
+                        let row = `<tr>
+                            <td>${vm.name}</td>
+                            <td>${vm.resourceGroup}</td>
+                            <td>${vm.location}</td>
+                            <td>${vm.vmSize}</td>
+                            <td>${vm.powerState}</td>
+                            <td>${networkInfo}</td>
+                            <td>${vm.osType}</td>
+                            <td>$${vm.monthlyCost || 0}</td>
+                            <td>
+                                <div class="btn-group">
+                                    <button class="btn btn-sm btn-primary start-stop-vm" data-vm="${vm.name}" data-rg="${vm.resourceGroup}" data-action="${vm.powerState === 'running' ? 'stop' : 'start'}">
+                                        ${vm.powerState === 'running' ? 'Stop' : 'Start'}
+                                    </button>
+                                    <button class="btn btn-sm btn-info view-details" data-vm="${vm.name}" data-rg="${vm.resourceGroup}">
+                                        Details
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>`;
+                        tableBody.append(row);
+                    });
+                },
+                error: function(xhr, status, error) {
+                    console.error('Error loading VMs:', error);
+                    alert('Error loading VMs. Please check console for details.');
+                }
             });
-
-            // Calculate total cost
-            const totalCost = response.vms.reduce((sum, vm) => sum + (vm.monthlyCost || 0), 0);
-            $('.total-cost').text(`$${totalCost.toFixed(2)}`);
-        },
-        error: function(xhr, status, error) {
-            showError('Failed to load VMs: ' + error);
-        },
-        complete: function() {
-            hideLoading();
         }
-    });
-}
 
-function showLoading() {
-    $('#loadingOverlay').show();
-}
+        $('#subscriptionSelect').change(function() {
+            currentSubscription = $(this).val();
+            loadVMs(true);
+        });
 
-function hideLoading() {
-    $('#loadingOverlay').hide();
-}
+        $('#refreshButton').click(function() {
+            loadVMs(true);
+        });
 
-function showError(message) {
-    const alert = $('#errorAlert');
-    alert.text(message).fadeIn();
-    setTimeout(() => alert.fadeOut(), 5000);
-}
+        $('#logoutButton').click(function() {
+            $.ajax({
+                url: '/api/logout',
+                method: 'POST',
+                success: function() {
+                    window.location.reload();
+                },
+                error: function(xhr, status, error) {
+                    console.error('Error logging out:', error);
+                    alert('Error logging out. Please check console for details.');
+                }
+            });
+        });
 
-$(document).ready(function() {
-    loadVMs();
-    
-    // Refresh button
-    $('#refreshButton').click(function() {
-        loadVMs(true);
-    });
-    
-    // Filter buttons
-    $('#applyFilters').click(function() {
+        // Initial load
         loadVMs();
     });
-    
-    $('#clearFilters').click(function() {
-        $('select.filter').val('');
-        loadVMs();
-    });
-});
 </script>
 {% endblock %}
