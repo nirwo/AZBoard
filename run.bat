@@ -26,9 +26,15 @@ if not exist "venv" (
 REM Activate virtual environment
 call venv\Scripts\activate.bat
 
-REM Install requirements
+REM Upgrade pip in virtual environment
+python -m pip install --upgrade pip
+
+REM Install wheel first
+pip install wheel
+
+REM Install requirements with verbose output
 echo Installing requirements...
-pip install -r requirements.txt
+pip install -r requirements.txt -v
 
 REM Create necessary directories
 if not exist "logs" mkdir logs
