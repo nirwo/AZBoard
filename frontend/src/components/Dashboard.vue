@@ -65,10 +65,10 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-if="vms.length === 0">
+                  <tr v-if="!vms || vms.length === 0">
                     <td colspan="8" class="text-center">No VMs found in selected subscriptions</td>
                   </tr>
-                  <tr v-for="vm in vms" :key="vm.id">
+                  <tr v-for="vm in vms" :key="vm.id || vm.name">
                     <td>{{ vm.name }}</td>
                     <td>{{ vm.resource_group }}</td>
                     <td>{{ vm.location }}</td>
@@ -79,14 +79,17 @@
                       </span>
                     </td>
                     <td>
-                      <div v-for="(nic, index) in vm.network_info" :key="index">
-                        <small>
-                          <div>Private IP: {{ nic.private_ip || 'None' }}</div>
-                          <div>Public IP: {{ nic.public_ip || 'None' }}</div>
-                          <div>Subnet: {{ nic.subnet || 'None' }}</div>
-                        </small>
-                        <hr v-if="index < vm.network_info.length - 1" class="my-1">
+                      <div v-if="vm.network_info && vm.network_info.length > 0">
+                        <div v-for="(nic, index) in vm.network_info" :key="index">
+                          <small>
+                            <div>Private IP: {{ nic.private_ip || 'None' }}</div>
+                            <div>Public IP: {{ nic.public_ip || 'None' }}</div>
+                            <div>Subnet: {{ nic.subnet || 'None' }}</div>
+                          </small>
+                          <hr v-if="index < vm.network_info.length - 1" class="my-1">
+                        </div>
                       </div>
+                      <div v-else>No network information available</div>
                     </td>
                     <td>{{ vm.os_type }}</td>
                     <td>
@@ -100,7 +103,7 @@
                           {{ vm.status === 'running' ? 'Stop' : 'Start' }}
                         </button>
                         <button
-                          class="btn btn-sm btn-info"
+                          class="btn btn-sm btn-info ms-1"
                           @click="viewDetails(vm)"
                           :disabled="isLoading"
                         >
@@ -180,16 +183,43 @@ export default {
 
       isLoading.value = true
       error.value = null
+      vms.value = [] // Clear existing VMs
 
       try {
+        // Get selected subscriptions
+        const subIds = Array.from(selectedSubscriptions.value)
+        console.log('Loading VMs with subscriptions:', subIds)
+
+        if (subIds.length === 0) {
+          console.log('No subscriptions selected')
+          return
+        }
+
+        // Make API request
         const response = await axios.get('/api/vms', {
           params: {
             force_refresh: forceRefresh,
-            subscription_ids: Array.from(selectedSubscriptions.value).join(',')
+            subscription_ids: subIds.join(',')
           }
         })
-        vms.value = response.data
+
+        // Log response
+        console.log('API Response:', response)
+        console.log('VM Data:', response.data)
+
+        // Update VMs
+        if (Array.isArray(response.data)) {
+          vms.value = response.data.map(vm => ({
+            ...vm,
+            network_info: Array.isArray(vm.network_info) ? vm.network_info : []
+          }))
+          console.log('Updated VMs array:', vms.value)
+        } else {
+          console.error('Invalid VM data format:', response.data)
+          error.value = 'Invalid data format received from server'
+        }
       } catch (err) {
+        console.error('Error loading VMs:', err)
         error.value = 'Error loading VMs: ' + (err.response?.data?.error || err.message)
       } finally {
         isLoading.value = false

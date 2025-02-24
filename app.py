@@ -1,6 +1,6 @@
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import json
 import logging
@@ -19,7 +19,22 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "http://localhost:5173"}})
+
+# Configure CORS
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["http://localhost:5173"],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"]
+    }
+})
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:5173')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # Database configuration from environment
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SQLALCHEMY_DATABASE_URI', 'sqlite:///azure_cache.db')
@@ -38,13 +53,13 @@ class VMCache(db.Model):
     subscription_id = db.Column(db.String(100))
     resource_group = db.Column(db.String(100))
     data = db.Column(db.Text)
-    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+    last_updated = db.Column(db.DateTime(timezone=True), default=datetime.now(timezone.utc))
 
 class SubscriptionCache(db.Model):
     id = db.Column(db.String(100), primary_key=True)
     display_name = db.Column(db.String(200))
     state = db.Column(db.String(50))
-    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+    last_updated = db.Column(db.DateTime(timezone=True), default=datetime.now(timezone.utc))
 
 # Create tables
 with app.app_context():
@@ -114,7 +129,7 @@ def get_azure_clients():
         return None, None
 
 def is_cache_expired(last_updated, cache_duration):
-    return datetime.utcnow() - last_updated > cache_duration
+    return datetime.now(timezone.utc) - last_updated > cache_duration
 
 def fetch_and_cache_vms(compute_client, subscription_id):
     vms = []
@@ -162,7 +177,7 @@ def fetch_and_cache_vms(compute_client, subscription_id):
                     subscription_id=subscription_id,
                     resource_group=vm_data['resource_group'],
                     data=json.dumps(vm_data),
-                    last_updated=datetime.utcnow()
+                    last_updated=datetime.now(timezone.utc)
                 )
                 
                 db.session.merge(cache_entry)
@@ -180,14 +195,11 @@ def fetch_and_cache_vms(compute_client, subscription_id):
 
 @app.route('/')
 def index():
-    try:
-        subscriptions = get_subscriptions()
-        if not subscriptions:
-            app.logger.warning("No subscriptions found")
-        return render_template('index.html', subscriptions=subscriptions)
-    except Exception as e:
-        app.logger.error(f"Error in index route: {str(e)}")
-        return render_template('index.html', subscriptions=[])
+    return send_from_directory('../frontend/dist', 'index.html')
+
+@app.route('/<path:path>')
+def serve_static(path):
+    return send_from_directory('../frontend/dist', path)
 
 @app.route('/api/subscriptions')
 def list_subscriptions():
@@ -304,7 +316,7 @@ def get_vms():
                                     subscription_id=subscription_id,
                                     resource_group=vm_data['resource_group'],
                                     data=json.dumps(vm_data),
-                                    last_updated=datetime.utcnow()
+                                    last_updated=datetime.now(timezone.utc)
                                 )
                                 
                                 db.session.merge(cache_entry)
@@ -361,7 +373,7 @@ def get_vms():
                                 subscription_id=subscription_id,
                                 resource_group=vm_data['resource_group'],
                                 data=json.dumps(vm_data),
-                                last_updated=datetime.utcnow()
+                                last_updated=datetime.now(timezone.utc)
                             )
                             
                             db.session.merge(cache_entry)

@@ -27,23 +27,40 @@
   </div>
 </template>
 
-<script setup>
+<script>
 import { ref, computed } from 'vue'
 import Dashboard from './components/Dashboard.vue'
 import KPIDashboard from './components/KPIDashboard.vue'
+import axios from 'axios'
 
-const currentView = ref('dashboard')
+// Configure axios defaults
+axios.defaults.baseURL = 'http://localhost:5000'
+axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest'
+
+export default {
+  name: 'App',
+  components: {
+    Dashboard,
+    KPIDashboard
+  },
+  setup() {
+    const currentView = ref('dashboard')
     
-const currentComponent = computed(() => {
-  switch (currentView.value) {
-    case 'kpi':
-      return KPIDashboard
-    default:
-      return Dashboard
-  }
-})
+    const currentComponent = computed(() => {
+      switch (currentView.value) {
+        case 'kpi':
+          return KPIDashboard
+        default:
+          return Dashboard
+      }
+    })
 
-const HelloWorld = () => import('./components/HelloWorld.vue')
+    return {
+      currentView,
+      currentComponent
+    }
+  }
+}
 </script>
 
 <style>

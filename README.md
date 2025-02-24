@@ -54,6 +54,36 @@ python app.py
 
 The dashboard will be available at `http://localhost:5000`
 
+## Security Best Practices
+
+### Environment Variables
+- Never commit `.env` files to version control
+- Use `.env.template` as a reference for required environment variables
+- Generate strong secret keys for Flask
+- Store Azure credentials securely
+
+### Azure Authentication
+1. **Preferred Method: Azure Managed Identity**
+   - Use in production environments
+   - No need to store credentials
+   - Automatically rotated by Azure
+
+2. **Development Method: Service Principal**
+   - Create a service principal with minimum required permissions
+   - Store credentials in `.env` file
+   - Never commit credentials to version control
+   - Regularly rotate client secrets
+
+3. **Local Development: Azure CLI**
+   - Use `az login` for local development
+   - Credentials are stored securely by Azure CLI
+   - No need for explicit credential management
+
+### Database Security
+- Use environment variables for database connections
+- Never commit database files (*.db, *.sqlite)
+- Use appropriate file permissions for database files
+
 ## Security Notes
 - Never commit `.env` file or any sensitive credentials
 - Use Azure Managed Identity in production when possible

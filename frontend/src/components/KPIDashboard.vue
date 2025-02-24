@@ -66,7 +66,7 @@
                 <div class="card">
                   <div class="card-body">
                     <h6 class="card-title">VMs by Region</h6>
-                    <DoughnutChart
+                    <Doughnut
                       v-if="chartData.regionChart.datasets[0].data.length > 0"
                       :data="chartData.regionChart"
                       :options="chartOptions"
@@ -81,7 +81,7 @@
                 <div class="card">
                   <div class="card-body">
                     <h6 class="card-title">VMs by Size</h6>
-                    <DoughnutChart
+                    <Doughnut
                       v-if="chartData.sizeChart.datasets[0].data.length > 0"
                       :data="chartData.sizeChart"
                       :options="chartOptions"
@@ -102,7 +102,7 @@
 
 <script>
 import { ref, onMounted } from 'vue'
-import { DoughnutChart } from 'vue-chartjs'
+import { Doughnut } from 'vue-chartjs'
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js'
 import axios from 'axios'
 
@@ -111,7 +111,7 @@ ChartJS.register(ArcElement, Tooltip, Legend)
 export default {
   name: 'KPIDashboard',
   components: {
-    DoughnutChart
+    Doughnut
   },
   setup() {
     const isLoading = ref(false)
