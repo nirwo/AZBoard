@@ -42,6 +42,9 @@ def get_vm_list_from_azure(subscription=None):
     # Use shell=True on Windows to find az in PATH
     shell = platform.system() == 'Windows'
     try:
+        if shell:
+            # For Windows, join the command into a string
+            cmd = ' '.join(cmd)
         result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
         if result.returncode != 0:
             app.logger.error(f"Failed to get VM list: {result.stderr}")
@@ -225,6 +228,9 @@ def get_vms_batch():
                       '--query', '{name: name, resourceGroup: resourceGroup, location: location, vmSize: hardwareProfile.vmSize, osType: storageProfile.osDisk.osType, powerState: powerState}', 
                       '--output', 'json']
                 shell = platform.system() == 'Windows'
+                if shell:
+                    # For Windows, join the command into a string
+                    cmd = ' '.join(cmd)
                 result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
                 
                 if result.returncode == 0:
@@ -233,6 +239,9 @@ def get_vms_batch():
                     
                     # Get IP addresses
                     ip_cmd = ['az', 'vm', 'list-ip-addresses', '--name', vm_name, '--resource-group', resource_group, '--output', 'json']
+                    if shell:
+                        # For Windows, join the command into a string
+                        ip_cmd = ' '.join(ip_cmd)
                     ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, shell=shell)
                     
                     if ip_result.returncode == 0:
@@ -261,14 +270,19 @@ def check_login():
     try:
         cmd = "az account show"
         shell = platform.system() == 'Windows'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             return jsonify({"status": "logged_in"})
         else:
-            return jsonify({"status": "not_logged_in"})
+            # Get the Azure login URL
+            login_url = "https://microsoft.com/devicelogin"
+            return jsonify({
+                "status": "not_logged_in",
+                "login_url": login_url
+            })
     except Exception as e:
-        app.logger.error(f"Error checking Azure login: {str(e)}")
-        return jsonify({"error": "Failed to check Azure login"}), 500
+        app.logger.error(f"Error checking login status: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/refresh', methods=['POST'])
 def refresh_data():
@@ -393,7 +407,7 @@ def get_storage_data():
         # Get storage accounts
         cmd = "az storage account list"
         shell = platform.system() == 'Windows'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             storage_accounts = json.loads(result.stdout)
             return jsonify({
@@ -412,7 +426,7 @@ def get_network_data():
         # Get network resources
         cmd = "az network vnet list"
         shell = platform.system() == 'Windows'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             vnets = json.loads(result.stdout)
         else:
@@ -420,7 +434,7 @@ def get_network_data():
             return jsonify({"error": "Failed to get VNets"}), 500
         
         cmd = "az network public-ip list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             public_ips = json.loads(result.stdout)
         else:
@@ -428,7 +442,7 @@ def get_network_data():
             return jsonify({"error": "Failed to get public IPs"}), 500
         
         cmd = "az network nsg list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, shell=shell)
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
         if result.returncode == 0:
             nsgs = json.loads(result.stdout)
         else:
@@ -453,13 +467,13 @@ def get_azure_instances():
         vm_command = "az vm list --show-details -d --query '[].{name:name,resourceGroup:resourceGroup,powerState:powerState,size:hardwareProfile.vmSize,location:location,osType:storageProfile.osDisk.osType}'"
         shell = platform.system() == 'Windows'
         app.logger.info(f"Running VM list command: {vm_command}")
-        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True, shell=shell)
+        result = subprocess.run(vm_command, capture_output=True, text=True, shell=shell)
         
-        if vm_result.returncode != 0:
-            app.logger.error(f"Failed to fetch VM list: {vm_result.stderr}")
+        if result.returncode != 0:
+            app.logger.error(f"Failed to fetch VM list: {result.stderr}")
             return {"error": "Failed to fetch VM list"}
         
-        vms = json.loads(vm_result.stdout)
+        vms = json.loads(result.stdout)
         instances = []
         total_cost = 0
         
@@ -519,7 +533,10 @@ def get_vm_details(vm_name, resource_group):
         # Get VM details including IP addresses
         vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} --show-details -d"
         shell = platform.system() == 'Windows'
-        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True, shell=shell)
+        if shell:
+            # For Windows, join the command into a string
+            vm_command = ' '.join(vm_command.split())
+        vm_result = subprocess.run(vm_command, capture_output=True, text=True, shell=shell)
         
         if vm_result.returncode != 0:
             app.logger.error(f"Failed to get VM details: {vm_result.stderr}")
@@ -529,7 +546,10 @@ def get_vm_details(vm_name, resource_group):
         
         # Get IP addresses using the simpler command
         ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
-        ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True, shell=shell)
+        if shell:
+            # For Windows, join the command into a string
+            ip_command = ' '.join(ip_command.split())
+        ip_result = subprocess.run(ip_command, capture_output=True, text=True, shell=shell)
         
         nics = []
         if ip_result.returncode == 0:
@@ -551,7 +571,10 @@ def get_vm_details(vm_name, resource_group):
                     
                     # Get NIC details for subnet information
                     nic_command = f"az network nic show -n {nic_name} -g {nic_resource_group}"
-                    nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True, shell=shell)
+                    if shell:
+                        # For Windows, join the command into a string
+                        nic_command = ' '.join(nic_command.split())
+                    nic_result = subprocess.run(nic_command, capture_output=True, text=True, shell=shell)
                     
                     if nic_result.returncode == 0:
                         nic_data = json.loads(nic_result.stdout)
