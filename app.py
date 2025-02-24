@@ -1,4 +1,6 @@
 from flask import Flask, render_template, jsonify, request
+from azure.identity import AzureCliCredential
+from azure.mgmt.compute import ComputeManagementClient
 from logging.handlers import RotatingFileHandler
 import os
 import json
@@ -31,29 +33,42 @@ if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 VM_LIST_CACHE_FILE = os.path.join(CACHE_DIR, 'vm_list.cache')
 
+SUBSCRIPTION_ID = "7e932c10-bfc9-4861-8403-11bc5cabc659"
+
 def get_vm_list_from_azure(subscription=None):
     """Get list of VMs directly from Azure"""
-    cmd = ['az', 'vm', 'list']
-    if subscription:
-        cmd.extend(['--subscription', subscription])
-    cmd.extend(['--query', '[].{name: name, resourceGroup: resourceGroup, location: location, powerState: powerState, vmSize: hardwareProfile.vmSize, tags: tags}'])
-    cmd.extend(['--output', 'json'])
-    
-    # Use shell=True on Windows to find az in PATH
-    shell = platform.system() == 'Windows'
     try:
-        if shell:
-            # For Windows, join the command into a string
-            cmd = ' '.join(cmd)
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
-        if result.returncode != 0:
-            app.logger.error(f"Failed to get VM list: {result.stderr}")
-            raise Exception(f"Failed to get VM list: {result.stderr}")
+        credential = AzureCliCredential()
+        compute_client = ComputeManagementClient(credential, subscription if subscription else SUBSCRIPTION_ID)
+        
+        vms = []
+        for vm in compute_client.virtual_machines.list_all():
+            vm_instance = compute_client.virtual_machines.instance_view(
+                vm.id.split('/')[4],  # resource group
+                vm.name
+            )
             
-        return json.loads(result.stdout)
-    except FileNotFoundError:
-        app.logger.error("Azure CLI (az) not found. Please install Azure CLI.")
-        raise Exception("Azure CLI (az) not found. Please install Azure CLI.")
+            power_state = "Unknown"
+            if vm_instance.statuses:
+                for status in vm_instance.statuses:
+                    if status.code.startswith("PowerState/"):
+                        power_state = status.code.split("/")[1]
+                        break
+            
+            vm_dict = vm.as_dict()
+            vms.append({
+                'name': vm_dict['name'],
+                'resourceGroup': vm_dict['id'].split('/')[4],
+                'location': vm_dict['location'],
+                'vmSize': vm_dict['hardware_profile']['vm_size'],
+                'powerState': power_state,
+                'tags': vm_dict.get('tags', {})
+            })
+        
+        return vms
+    except Exception as e:
+        app.logger.error(f"Error getting VM list: {str(e)}")
+        raise Exception(f"Error getting VM list: {str(e)}")
 
 def load_vm_list_from_cache():
     """Load VM list from cache if it exists and is not expired"""
@@ -223,38 +238,73 @@ def get_vms_batch():
                 continue
                 
             try:
-                # Get basic VM info
-                cmd = ['az', 'vm', 'show', '--name', vm_name, '--resource-group', resource_group, 
-                      '--query', '{name: name, resourceGroup: resourceGroup, location: location, vmSize: hardwareProfile.vmSize, osType: storageProfile.osDisk.osType, powerState: powerState}', 
-                      '--output', 'json']
-                shell = platform.system() == 'Windows'
-                if shell:
-                    # For Windows, join the command into a string
-                    cmd = ' '.join(cmd)
-                result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
+                credential = AzureCliCredential()
+                compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
                 
-                if result.returncode == 0:
-                    vm_data = json.loads(result.stdout)
-                    batch_data[vm_info] = {'vm': vm_data}
+                # Get VM details
+                vm = compute_client.virtual_machines.get(resource_group, vm_name, expand='instanceView')
+                vm_dict = vm.as_dict()
+                
+                # Get IP addresses
+                nics = []
+                for nic in vm_dict['properties']['networkProfile']['networkInterfaces']:
+                    nic_name = nic['id'].split('/')[-1]
+                    nic_resource_group = nic['id'].split('/')[4]
                     
-                    # Get IP addresses
-                    ip_cmd = ['az', 'vm', 'list-ip-addresses', '--name', vm_name, '--resource-group', resource_group, '--output', 'json']
-                    if shell:
-                        # For Windows, join the command into a string
-                        ip_cmd = ' '.join(ip_cmd)
-                    ip_result = subprocess.run(ip_cmd, capture_output=True, text=True, shell=shell)
+                    # Get NIC details for subnet information
+                    nic_client = compute_client.network_interfaces.get(nic_resource_group, nic_name)
+                    nic_dict = nic_client.as_dict()
                     
-                    if ip_result.returncode == 0:
-                        ip_data = json.loads(ip_result.stdout)
-                        if ip_data and len(ip_data) > 0:
-                            network = ip_data[0].get('virtualMachine', {}).get('network', {})
-                            batch_data[vm_info]['network'] = network
+                    ip_configs = nic_dict['properties']['ipConfigurations']
                     
-                    # Cache the data
-                    save_to_cache(vm_name, resource_group, batch_data[vm_info])
-                else:
-                    app.logger.error(f"Failed to get VM details for {vm_info}: {result.stderr}")
-                    
+                    for i, ip_config in enumerate(ip_configs):
+                        subnet_id = ip_config['subnet']['id']
+                        subnet_parts = subnet_id.split('/') if subnet_id else []
+                        vnet_name = subnet_parts[-3] if len(subnet_parts) > 3 else 'Not configured'
+                        subnet_name = subnet_parts[-1] if subnet_parts else 'Not configured'
+                        
+                        private_ip = ip_config['properties']['privateIPAddress']
+                        public_ip = ip_config['properties'].get('publicIPAddress', {}).get('ipAddress') if ip_config['properties'].get('publicIPAddress') else 'Not configured'
+                        
+                        nics.append({
+                            'name': nic_name,
+                            'private_ip': private_ip,
+                            'public_ip': public_ip,
+                            'subnet': subnet_name,
+                            'vnet': vnet_name,
+                            'status': 'Configured',
+                            'primary': ip_config['properties']['primary']
+                        })
+                
+                # Get disk details
+                disks = []
+                os_disk = vm_dict['properties']['storageProfile']['osDisk']
+                if os_disk:
+                    disks.append({
+                        'name': os_disk['name'],
+                        'size_gb': os_disk['diskSizeGB'],
+                        'type': os_disk['managedDisk']['storageAccountType'],
+                        'is_os_disk': True
+                    })
+                
+                # Add data disks
+                for data_disk in vm_dict['properties']['storageProfile']['dataDisks']:
+                    disks.append({
+                        'name': data_disk['name'],
+                        'size_gb': data_disk['diskSizeGB'],
+                        'type': data_disk['managedDisk']['storageAccountType'],
+                        'is_os_disk': False,
+                        'lun': data_disk['lun']
+                    })
+                
+                batch_data[vm_info] = {
+                    'vm': vm_dict,
+                    'nics': nics,
+                    'disks': disks
+                }
+                
+                # Cache the data
+                save_to_cache(vm_name, resource_group, batch_data[vm_info])
             except Exception as e:
                 app.logger.error(f"Error processing VM {vm_info}: {str(e)}")
                 continue
@@ -268,21 +318,17 @@ def get_vms_batch():
 @app.route('/api/check-login')
 def check_login():
     try:
-        cmd = "az account show"
-        shell = platform.system() == 'Windows'
-        result = subprocess.run(cmd, capture_output=True, text=True, shell=shell)
-        if result.returncode == 0:
-            return jsonify({"status": "logged_in"})
-        else:
-            # Get the Azure login URL
-            login_url = "https://microsoft.com/devicelogin"
-            return jsonify({
-                "status": "not_logged_in",
-                "login_url": login_url
-            })
+        credential = AzureCliCredential()
+        compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
+        # Test the client by listing VMs
+        next(compute_client.virtual_machines.list_all(), None)
+        return jsonify({"status": "logged_in"})
     except Exception as e:
         app.logger.error(f"Error checking login status: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "status": "not_logged_in",
+            "error": str(e)
+        }), 401
 
 @app.route('/api/refresh', methods=['POST'])
 def refresh_data():
@@ -463,17 +509,32 @@ def get_azure_instances():
     try:
         app.logger.info("Fetching Azure instances data...")
         
-        # Get VM list with all details
-        vm_command = "az vm list --show-details -d --query '[].{name:name,resourceGroup:resourceGroup,powerState:powerState,size:hardwareProfile.vmSize,location:location,osType:storageProfile.osDisk.osType}'"
-        shell = platform.system() == 'Windows'
-        app.logger.info(f"Running VM list command: {vm_command}")
-        result = subprocess.run(vm_command, capture_output=True, text=True, shell=shell)
+        credential = AzureCliCredential()
+        compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
         
-        if result.returncode != 0:
-            app.logger.error(f"Failed to fetch VM list: {result.stderr}")
-            return {"error": "Failed to fetch VM list"}
+        vms = []
+        for vm in compute_client.virtual_machines.list_all():
+            vm_instance = compute_client.virtual_machines.instance_view(
+                vm.id.split('/')[4],  # resource group
+                vm.name
+            )
+            
+            power_state = "Unknown"
+            if vm_instance.statuses:
+                for status in vm_instance.statuses:
+                    if status.code.startswith("PowerState/"):
+                        power_state = status.code.split("/")[1]
+                        break
+            
+            vm_dict = vm.as_dict()
+            vms.append({
+                'name': vm_dict['name'],
+                'resourceGroup': vm_dict['id'].split('/')[4],
+                'location': vm_dict['location'],
+                'size': vm_dict['hardware_profile']['vm_size'],
+                'powerState': power_state
+            })
         
-        vms = json.loads(result.stdout)
         instances = []
         total_cost = 0
         
@@ -499,7 +560,6 @@ def get_azure_instances():
                 'status': vm.get('powerState', 'Unknown'),
                 'size': vm.get('size'),
                 'location': vm.get('location'),
-                'osType': vm.get('osType'),
                 'monthly_cost': monthly_cost,
                 'nics': details['nics'],
                 'disks': details['disks']
@@ -530,109 +590,67 @@ def get_vm_details(vm_name, resource_group):
         
         app.logger.info(f"Getting details for VM {vm_name} in resource group {resource_group}")
         
-        # Get VM details including IP addresses
-        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} --show-details -d"
-        shell = platform.system() == 'Windows'
-        if shell:
-            # For Windows, join the command into a string
-            vm_command = ' '.join(vm_command.split())
-        vm_result = subprocess.run(vm_command, capture_output=True, text=True, shell=shell)
+        credential = AzureCliCredential()
+        compute_client = ComputeManagementClient(credential, SUBSCRIPTION_ID)
         
-        if vm_result.returncode != 0:
-            app.logger.error(f"Failed to get VM details: {vm_result.stderr}")
-            return None
+        # Get VM details
+        vm = compute_client.virtual_machines.get(resource_group, vm_name, expand='instanceView')
+        vm_dict = vm.as_dict()
         
-        vm_data = json.loads(vm_result.stdout)
-        
-        # Get IP addresses using the simpler command
-        ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
-        if shell:
-            # For Windows, join the command into a string
-            ip_command = ' '.join(ip_command.split())
-        ip_result = subprocess.run(ip_command, capture_output=True, text=True, shell=shell)
-        
+        # Get IP addresses
         nics = []
-        if ip_result.returncode == 0:
-            ip_data = json.loads(ip_result.stdout)
-            if ip_data and len(ip_data) > 0:
-                network = ip_data[0].get('virtualMachine', {}).get('network', {})
-                private_ips = network.get('privateIpAddresses', [])
-                public_ips = network.get('publicIpAddresses', [])
+        for nic in vm_dict['properties']['networkProfile']['networkInterfaces']:
+            nic_name = nic['id'].split('/')[-1]
+            nic_resource_group = nic['id'].split('/')[4]
+            
+            # Get NIC details for subnet information
+            nic_client = compute_client.network_interfaces.get(nic_resource_group, nic_name)
+            nic_dict = nic_client.as_dict()
+            
+            ip_configs = nic_dict['properties']['ipConfigurations']
+            
+            for i, ip_config in enumerate(ip_configs):
+                subnet_id = ip_config['subnet']['id']
+                subnet_parts = subnet_id.split('/') if subnet_id else []
+                vnet_name = subnet_parts[-3] if len(subnet_parts) > 3 else 'Not configured'
+                subnet_name = subnet_parts[-1] if subnet_parts else 'Not configured'
                 
-                # Get NIC details for additional information
-                for i, ip_config in enumerate(vm_data.get('networkProfile', {}).get('networkInterfaces', [])):
-                    nic_id = ip_config.get('id', '')
-                    if not nic_id:
-                        continue
-                    
-                    nic_parts = nic_id.split('/')
-                    nic_name = nic_parts[-1]
-                    nic_resource_group = nic_parts[4] if len(nic_parts) > 4 else resource_group
-                    
-                    # Get NIC details for subnet information
-                    nic_command = f"az network nic show -n {nic_name} -g {nic_resource_group}"
-                    if shell:
-                        # For Windows, join the command into a string
-                        nic_command = ' '.join(nic_command.split())
-                    nic_result = subprocess.run(nic_command, capture_output=True, text=True, shell=shell)
-                    
-                    if nic_result.returncode == 0:
-                        nic_data = json.loads(nic_result.stdout)
-                        ip_configs = nic_data.get('ipConfigurations', [])
-                        
-                        for i, ip_config in enumerate(ip_configs):
-                            subnet_id = ip_config.get('subnet', {}).get('id', '')
-                            subnet_parts = subnet_id.split('/') if subnet_id else []
-                            vnet_name = subnet_parts[-3] if len(subnet_parts) > 3 else 'Not configured'
-                            subnet_name = subnet_parts[-1] if subnet_parts else 'Not configured'
-                            
-                            private_ip = private_ips[i] if i < len(private_ips) else 'Not configured'
-                            public_ip = public_ips[i].get('ipAddress') if i < len(public_ips) else 'Not configured'
-                            
-                            nics.append({
-                                'name': nic_name,
-                                'private_ip': private_ip,
-                                'public_ip': public_ip,
-                                'subnet': subnet_name,
-                                'vnet': vnet_name,
-                                'status': 'Configured',
-                                'primary': ip_config.get('primary', False)
-                            })
-        
-        # If no NICs were found through IP addresses, add a default entry
-        if not nics:
-            nics.append({
-                'name': 'Default NIC',
-                'private_ip': 'Not configured',
-                'public_ip': 'Not configured',
-                'subnet': 'Not configured',
-                'vnet': 'Not configured',
-                'status': 'No IP configuration'
-            })
+                private_ip = ip_config['properties']['privateIPAddress']
+                public_ip = ip_config['properties'].get('publicIPAddress', {}).get('ipAddress') if ip_config['properties'].get('publicIPAddress') else 'Not configured'
+                
+                nics.append({
+                    'name': nic_name,
+                    'private_ip': private_ip,
+                    'public_ip': public_ip,
+                    'subnet': subnet_name,
+                    'vnet': vnet_name,
+                    'status': 'Configured',
+                    'primary': ip_config['properties']['primary']
+                })
         
         # Get disk details
         disks = []
-        os_disk = vm_data.get('storageProfile', {}).get('osDisk', {})
+        os_disk = vm_dict['properties']['storageProfile']['osDisk']
         if os_disk:
             disks.append({
-                'name': os_disk.get('name', 'OS Disk'),
-                'size_gb': os_disk.get('diskSizeGb'),
-                'type': os_disk.get('managedDisk', {}).get('storageAccountType'),
+                'name': os_disk['name'],
+                'size_gb': os_disk['diskSizeGB'],
+                'type': os_disk['managedDisk']['storageAccountType'],
                 'is_os_disk': True
             })
         
         # Add data disks
-        for data_disk in vm_data.get('storageProfile', {}).get('dataDisks', []):
+        for data_disk in vm_dict['properties']['storageProfile']['dataDisks']:
             disks.append({
-                'name': data_disk.get('name', 'Data Disk'),
-                'size_gb': data_disk.get('diskSizeGb'),
-                'type': data_disk.get('managedDisk', {}).get('storageAccountType'),
+                'name': data_disk['name'],
+                'size_gb': data_disk['diskSizeGB'],
+                'type': data_disk['managedDisk']['storageAccountType'],
                 'is_os_disk': False,
-                'lun': data_disk.get('lun')
+                'lun': data_disk['lun']
             })
         
         result = {
-            'vm': vm_data,
+            'vm': vm_dict,
             'nics': nics,
             'disks': disks
         }
