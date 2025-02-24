@@ -5,7 +5,7 @@ import axios from 'axios'
 import 'bootstrap'
 
 // Configure axios
-axios.defaults.baseURL = 'http://localhost:5000'
+axios.defaults.withCredentials = true
 axios.defaults.headers.common['X-Requested-With'] = 'XMLHttpRequest'
 
 const app = createApp(App)
