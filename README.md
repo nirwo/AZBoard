@@ -11,6 +11,60 @@ A modern web application that displays Azure VM instances information in an inte
 - Real-time data refresh
 - Bootstrap 5 modern UI
 
+## Setup
+
+1. Clone the repository
+```bash
+git clone <repository-url>
+cd azure-instance-dashboard
+```
+
+2. Create and activate a virtual environment
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+4. Set up environment variables
+```bash
+cp .env.template .env
+```
+Edit `.env` with your Azure credentials and configuration:
+- `AZURE_TENANT_ID`: Your Azure tenant ID
+- `AZURE_SUBSCRIPTION_ID`: Your Azure subscription ID
+- `AZURE_CLIENT_ID`: Your Azure client ID (if using service principal)
+- `AZURE_CLIENT_SECRET`: Your Azure client secret (if using service principal)
+
+5. Initialize the database
+```bash
+flask db init
+flask db migrate
+flask db upgrade
+```
+
+6. Run the application
+```bash
+python app.py
+```
+
+The dashboard will be available at `http://localhost:5000`
+
+## Security Notes
+- Never commit `.env` file or any sensitive credentials
+- Use Azure Managed Identity in production when possible
+- Regularly rotate any service principal credentials
+- Store production secrets in Azure Key Vault
+
+## Development
+- Use `.env.template` as a reference for required environment variables
+- Local SQLite database is used for development
+- Cache duration can be configured via environment variables
+
 ## Prerequisites
 
 - Python 3.8+

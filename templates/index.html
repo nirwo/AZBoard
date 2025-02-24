@@ -75,18 +75,32 @@
 {% block content %}
 <div class="container-fluid mt-4">
     <div class="row mb-3">
-        <div class="col">
-            <select id="subscriptionSelect" class="form-select">
-                {% for sub in subscriptions %}
-                    <option value="{{ sub.id }}">{{ sub.display_name }}</option>
-                {% endfor %}
-            </select>
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Subscriptions</h5>
+                </div>
+                <div class="card-body">
+                    <div class="subscription-list">
+                        {% for sub in subscriptions %}
+                        <div class="form-check">
+                            <input class="form-check-input subscription-checkbox" type="checkbox" 
+                                   value="{{ sub.id }}" id="sub_{{ sub.id }}" 
+                                   data-name="{{ sub.display_name }}">
+                            <label class="form-check-label" for="sub_{{ sub.id }}">
+                                {{ sub.display_name }}
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
         </div>
-        <div class="col">
-            <button id="refreshButton" class="btn btn-primary">
+        <div class="col-md-4">
+            <button id="refreshButton" class="btn btn-primary mb-2 w-100">
                 <i class="fas fa-sync-alt"></i> Refresh
             </button>
-            <button id="logoutButton" class="btn btn-danger">
+            <button id="logoutButton" class="btn btn-danger w-100">
                 <i class="fas fa-sign-out-alt"></i> Logout
             </button>
         </div>
@@ -188,21 +202,57 @@
 {% block scripts %}
 <script>
     $(document).ready(function() {
-        let currentSubscription = $('#subscriptionSelect').val();
+        let selectedSubscriptions = new Set();
+        let isLoading = false;
         
+        function showLoading() {
+            isLoading = true;
+            $('#loadingOverlay').removeClass('d-none');
+            $('#vmTable').addClass('d-none');
+            $('#errorAlert').addClass('d-none');
+        }
+        
+        function hideLoading() {
+            isLoading = false;
+            $('#loadingOverlay').addClass('d-none');
+            $('#vmTable').removeClass('d-none');
+        }
+        
+        function showError(message) {
+            $('#errorAlert').removeClass('d-none').text(message);
+            console.error(message);
+        }
+
         function loadVMs(forceRefresh = false) {
+            if (isLoading) return;
+            
+            // If no subscriptions selected, use all available subscriptions
+            if (selectedSubscriptions.size === 0) {
+                $('.subscription-checkbox').each(function() {
+                    selectedSubscriptions.add($(this).val());
+                    $(this).prop('checked', true);
+                });
+            }
+
+            showLoading();
+            
             $.ajax({
                 url: '/api/vms',
                 data: {
                     force_refresh: forceRefresh,
-                    subscription_id: currentSubscription,
-                    resource_group: $('#resourceGroupFilter').val(),
-                    status: $('#statusFilter').val(),
-                    vm_size: $('#vmSizeFilter').val()
+                    subscription_ids: Array.from(selectedSubscriptions).join(',')
                 },
                 success: function(data) {
-                    let tableBody = $('#vmTable');
+                    console.log('Received VM data:', data);
+                    let tableBody = $('#vmTable tbody');
                     tableBody.empty();
+                    
+                    if (!data || data.length === 0) {
+                        tableBody.append(
+                            '<tr><td colspan="8" class="text-center">No VMs found in selected subscriptions</td></tr>'
+                        );
+                        return;
+                    }
                     
                     data.forEach(function(vm) {
                         let networkInfo = '';
@@ -226,10 +276,17 @@
                             <td>${vm.os_type}</td>
                             <td>
                                 <div class="btn-group">
-                                    <button class="btn btn-sm btn-primary start-stop-vm" data-vm="${vm.name}" data-rg="${vm.resource_group}" data-action="${vm.status === 'running' ? 'stop' : 'start'}">
+                                    <button class="btn btn-sm btn-primary start-stop-vm" 
+                                            data-vm="${vm.name}" 
+                                            data-rg="${vm.resource_group}" 
+                                            data-sub="${vm.subscription_id}"
+                                            data-action="${vm.status === 'running' ? 'stop' : 'start'}">
                                         ${vm.status === 'running' ? 'Stop' : 'Start'}
                                     </button>
-                                    <button class="btn btn-sm btn-info view-details" data-vm="${vm.name}" data-rg="${vm.resource_group}">
+                                    <button class="btn btn-sm btn-info view-details" 
+                                            data-vm="${vm.name}" 
+                                            data-rg="${vm.resource_group}"
+                                            data-sub="${vm.subscription_id}">
                                         Details
                                     </button>
                                 </div>
@@ -240,7 +297,10 @@
                 },
                 error: function(xhr, status, error) {
                     console.error('Error loading VMs:', error);
-                    alert('Error loading VMs. Please check console for details.');
+                    showError('Error loading VMs: ' + error);
+                },
+                complete: function() {
+                    hideLoading();
                 }
             });
         }
@@ -250,27 +310,42 @@
             url: '/api/check-login',
             success: function(data) {
                 if (data.status === 'logged_in') {
-                    loadVMs();
+                    // Select all subscriptions by default
+                    $('.subscription-checkbox').each(function() {
+                        selectedSubscriptions.add($(this).val());
+                        $(this).prop('checked', true);
+                    });
+                    loadVMs(true);
                 } else {
-                    alert('Please login to Azure first using az login');
+                    showError('Please login to Azure first using az login');
                 }
             },
             error: function(xhr, status, error) {
-                console.error('Error checking login status:', xhr);
-                alert('Please login to Azure first using az login');
+                console.error('Error checking login status:', error);
+                showError('Error checking login status: ' + error);
             }
         });
 
-        $('#subscriptionSelect').change(function() {
-            currentSubscription = $(this).val();
+        // Handle subscription checkbox changes
+        $('.subscription-checkbox').change(function() {
+            const subId = $(this).val();
+            if (this.checked) {
+                selectedSubscriptions.add(subId);
+            } else {
+                selectedSubscriptions.delete(subId);
+            }
             loadVMs(true);
         });
 
         $('#refreshButton').click(function() {
-            loadVMs(true);
+            if (!isLoading) {
+                loadVMs(true);
+            }
         });
 
         $('#logoutButton').click(function() {
+            if (isLoading) return;
+            
             $.ajax({
                 url: '/api/logout',
                 method: 'POST',
@@ -279,7 +354,70 @@
                 },
                 error: function(xhr, status, error) {
                     console.error('Error logging out:', error);
-                    alert('Error logging out. Please check console for details.');
+                    showError('Error logging out: ' + error);
+                }
+            });
+        });
+
+        // Handle start/stop VM
+        $('#vmTable').on('click', '.start-stop-vm', function() {
+            if (isLoading) return;
+            
+            const vm = $(this).data('vm');
+            const rg = $(this).data('rg');
+            const sub = $(this).data('sub');
+            const action = $(this).data('action');
+            
+            showLoading();
+            
+            $.ajax({
+                url: `/api/vm/${action}`,
+                method: 'POST',
+                data: {
+                    vm_name: vm,
+                    resource_group: rg,
+                    subscription_id: sub
+                },
+                success: function() {
+                    loadVMs(true);
+                },
+                error: function(xhr, status, error) {
+                    console.error(`Error ${action}ing VM:`, error);
+                    showError(`Error ${action}ing VM: ${error}`);
+                    hideLoading();
+                }
+            });
+        });
+
+        // Handle view details
+        $('#vmTable').on('click', '.view-details', function() {
+            if (isLoading) return;
+            
+            const vm = $(this).data('vm');
+            const rg = $(this).data('rg');
+            const sub = $(this).data('sub');
+            
+            showLoading();
+            
+            $.ajax({
+                url: '/api/vm/details',
+                data: {
+                    vm_name: vm,
+                    resource_group: rg,
+                    subscription_id: sub
+                },
+                success: function(data) {
+                    $('#vmDetailsModal .modal-body').html(
+                        `<pre>${JSON.stringify(data, null, 2)}</pre>`
+                    );
+                    $('#vmDetailsModal').modal('show');
+                },
+                error: function(xhr, status, error) {
+                    console.error('Error fetching VM details:', error);
+                    showError('Error fetching VM details: ' + error);
+                },
+                complete: function() {
+                    hideLoading();
                 }
             });
         });
