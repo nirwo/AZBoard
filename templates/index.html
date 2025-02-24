@@ -162,8 +162,7 @@
                             <th>Size</th>
                             <th>Status</th>
                             <th>Network</th>
-                            <th>Storage</th>
-                            <th>Monthly Cost</th>
+                            <th>OS Type</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -206,27 +205,31 @@
                     tableBody.empty();
                     
                     data.forEach(function(vm) {
-                        let networkInfo = vm.nics.map(nic => 
-                            `Private IP: ${nic.private_ip}<br>` +
-                            `Public IP: ${nic.public_ip || 'None'}<br>` +
-                            `Subnet: ${nic.subnet}`
-                        ).join('<hr>');
+                        let networkInfo = '';
+                        if (vm.network_info && Array.isArray(vm.network_info)) {
+                            networkInfo = vm.network_info.map(nic => 
+                                `Private IP: ${nic.private_ip || 'None'}<br>` +
+                                `Public IP: ${nic.public_ip || 'None'}<br>` +
+                                `Subnet: ${nic.subnet || 'None'}`
+                            ).join('<hr>');
+                        } else {
+                            networkInfo = 'No network information available';
+                        }
                         
                         let row = `<tr>
                             <td>${vm.name}</td>
-                            <td>${vm.resourceGroup}</td>
+                            <td>${vm.resource_group}</td>
                             <td>${vm.location}</td>
-                            <td>${vm.vmSize}</td>
-                            <td>${vm.powerState}</td>
+                            <td>${vm.vm_size}</td>
+                            <td>${vm.status}</td>
                             <td>${networkInfo}</td>
-                            <td>${vm.osType}</td>
-                            <td>$${vm.monthlyCost || 0}</td>
+                            <td>${vm.os_type}</td>
                             <td>
                                 <div class="btn-group">
-                                    <button class="btn btn-sm btn-primary start-stop-vm" data-vm="${vm.name}" data-rg="${vm.resourceGroup}" data-action="${vm.powerState === 'running' ? 'stop' : 'start'}">
-                                        ${vm.powerState === 'running' ? 'Stop' : 'Start'}
+                                    <button class="btn btn-sm btn-primary start-stop-vm" data-vm="${vm.name}" data-rg="${vm.resource_group}" data-action="${vm.status === 'running' ? 'stop' : 'start'}">
+                                        ${vm.status === 'running' ? 'Stop' : 'Start'}
                                     </button>
-                                    <button class="btn btn-sm btn-info view-details" data-vm="${vm.name}" data-rg="${vm.resourceGroup}">
+                                    <button class="btn btn-sm btn-info view-details" data-vm="${vm.name}" data-rg="${vm.resource_group}">
                                         Details
                                     </button>
                                 </div>
@@ -241,6 +244,22 @@
                 }
             });
         }
+
+        // Check login status first
+        $.ajax({
+            url: '/api/check-login',
+            success: function(data) {
+                if (data.status === 'logged_in') {
+                    loadVMs();
+                } else {
+                    alert('Please login to Azure first using az login');
+                }
+            },
+            error: function(xhr, status, error) {
+                console.error('Error checking login status:', xhr);
+                alert('Please login to Azure first using az login');
+            }
+        });
 
         $('#subscriptionSelect').change(function() {
             currentSubscription = $(this).val();
@@ -264,9 +283,6 @@
                 }
             });
         });
-
-        // Initial load
-        loadVMs();
     });
 </script>
 {% endblock %}
