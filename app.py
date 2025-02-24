@@ -1,90 +1,28 @@
-from flask import Flask, render_template, jsonify, request, session
-from flask_caching import Cache
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask, render_template, jsonify, request
+from logging.handlers import RotatingFileHandler
+import os
 import json
 import subprocess
-import re
-import humanize
-from datetime import datetime
 import logging
-from logging.handlers import RotatingFileHandler
-import time
-import secrets
-import os
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-handler = RotatingFileHandler('azure_dashboard.log', maxBytes=10000000, backupCount=5)
-handler.setFormatter(logging.Formatter(
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+file_handler = RotatingFileHandler('logs/azure_dashboard.log', maxBytes=10240, backupCount=10)
+file_handler.setFormatter(logging.Formatter(
     '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
 ))
-app.logger.addHandler(handler)
+file_handler.setLevel(logging.INFO)
+app.logger.addHandler(file_handler)
+app.logger.setLevel(logging.INFO)
+app.logger.info('Azure Dashboard startup')
 
-# Configure caching
+# Cache configuration
 CACHE_DIR = 'cache'
-CACHE_DURATION = 300  # Cache data for 5 minutes
-cache = Cache(app, config={'CACHE_TYPE': 'simple'})
-
-# Configure rate limiting
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
-)
-
-# Global variable to store the last refresh time
-last_refresh_time = None
-
-def check_azure_login():
-    try:
-        cmd = "az account show"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        return result.returncode == 0
-    except Exception:
-        return False
-
-def get_azure_login_url():
-    try:
-        cmd = "az login --only-show-url"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception as e:
-        app.logger.error(f"Error getting Azure login URL: {str(e)}")
-    return None
-
-@app.route('/api/check-login')
-def check_login():
-    is_logged_in = check_azure_login()
-    if is_logged_in:
-        return jsonify({"status": "logged_in"})
-    else:
-        login_url = get_azure_login_url()
-        return jsonify({
-            "status": "not_logged_in",
-            "login_url": login_url
-        })
-
-def get_vm_status(vm_name, resource_group):
-    try:
-        status_command = f"az vm get-instance-view --name {vm_name} --resource-group {resource_group} --query instanceView.statuses[1].displayStatus -o tsv"
-        status_result = subprocess.run(status_command, shell=True, capture_output=True, text=True)
-        return status_result.stdout.strip() if status_result.returncode == 0 else 'Unknown'
-    except Exception:
-        return 'Unknown'
-
-def get_vm_size(vm_name, resource_group):
-    try:
-        size_command = f"az vm show --name {vm_name} --resource-group {resource_group} --query hardwareProfile.vmSize -o tsv"
-        size_result = subprocess.run(size_command, shell=True, capture_output=True, text=True)
-        return size_result.stdout.strip() if size_result.returncode == 0 else 'Unknown'
-    except Exception:
-        return 'Unknown'
+CACHE_DURATION = timedelta(minutes=5)  # Cache data for 5 minutes
 
 def get_cache_file_path(vm_name, resource_group):
     """Generate cache file path for a VM"""
@@ -100,7 +38,7 @@ def load_from_cache(vm_name, resource_group):
                 cache_time = datetime.fromisoformat(cached_data['cache_time'])
                 
                 # Check if cache is still valid
-                if datetime.now() - cache_time < datetime.timedelta(minutes=CACHE_DURATION):
+                if datetime.now() - cache_time < CACHE_DURATION:
                     app.logger.info(f"Using cached data for VM {vm_name}")
                     return cached_data['data']
     except Exception as e:
@@ -124,205 +62,6 @@ def save_to_cache(vm_name, resource_group, data):
     except Exception as e:
         app.logger.error(f"Error writing cache: {str(e)}")
 
-def get_vm_details(vm_name, resource_group):
-    """Get detailed VM information including NICs and disks"""
-    # Try to get data from cache first
-    cached_data = load_from_cache(vm_name, resource_group)
-    if cached_data:
-        return cached_data
-        
-    try:
-        app.logger.info(f"Getting details for VM {vm_name} in resource group {resource_group}")
-        
-        # Get VM details including IP addresses
-        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} --show-details -d"
-        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
-        
-        if vm_result.returncode != 0:
-            app.logger.error(f"Failed to get VM details: {vm_result.stderr}")
-            return None
-        
-        vm_data = json.loads(vm_result.stdout)
-        
-        # Get IP addresses using the simpler command
-        ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
-        ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True)
-        
-        nics = []
-        if ip_result.returncode == 0:
-            ip_data = json.loads(ip_result.stdout)
-            if ip_data and len(ip_data) > 0:
-                network = ip_data[0].get('virtualMachine', {}).get('network', {})
-                private_ips = network.get('privateIpAddresses', [])
-                public_ips = network.get('publicIpAddresses', [])
-                
-                # Get NIC details for additional information
-                for nic_ref in vm_data.get('networkProfile', {}).get('networkInterfaces', []):
-                    nic_id = nic_ref.get('id', '')
-                    if not nic_id:
-                        continue
-                    
-                    nic_parts = nic_id.split('/')
-                    nic_name = nic_parts[-1]
-                    nic_resource_group = nic_parts[4] if len(nic_parts) > 4 else resource_group
-                    
-                    # Get NIC details for subnet information
-                    nic_command = f"az network nic show -n {nic_name} -g {nic_resource_group}"
-                    nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True)
-                    
-                    if nic_result.returncode == 0:
-                        nic_data = json.loads(nic_result.stdout)
-                        ip_configs = nic_data.get('ipConfigurations', [])
-                        
-                        for i, ip_config in enumerate(ip_configs):
-                            subnet_id = ip_config.get('subnet', {}).get('id', '')
-                            subnet_parts = subnet_id.split('/') if subnet_id else []
-                            vnet_name = subnet_parts[-3] if len(subnet_parts) > 3 else 'Not configured'
-                            subnet_name = subnet_parts[-1] if subnet_parts else 'Not configured'
-                            
-                            private_ip = private_ips[i] if i < len(private_ips) else 'Not configured'
-                            public_ip = public_ips[i].get('ipAddress') if i < len(public_ips) else 'Not configured'
-                            
-                            nics.append({
-                                'name': nic_name,
-                                'private_ip': private_ip,
-                                'public_ip': public_ip,
-                                'subnet': subnet_name,
-                                'vnet': vnet_name,
-                                'status': 'Configured',
-                                'primary': ip_config.get('primary', False)
-                            })
-        
-        # If no NICs were found through IP addresses, add a default entry
-        if not nics:
-            nics.append({
-                'name': 'Default NIC',
-                'private_ip': 'Not configured',
-                'public_ip': 'Not configured',
-                'subnet': 'Not configured',
-                'vnet': 'Not configured',
-                'status': 'No IP configuration'
-            })
-        
-        # Get disk details
-        disks = []
-        os_disk = vm_data.get('storageProfile', {}).get('osDisk', {})
-        if os_disk:
-            disks.append({
-                'name': os_disk.get('name', 'OS Disk'),
-                'size_gb': os_disk.get('diskSizeGb'),
-                'type': os_disk.get('managedDisk', {}).get('storageAccountType'),
-                'is_os_disk': True
-            })
-        
-        # Add data disks
-        for data_disk in vm_data.get('storageProfile', {}).get('dataDisks', []):
-            disks.append({
-                'name': data_disk.get('name', 'Data Disk'),
-                'size_gb': data_disk.get('diskSizeGb'),
-                'type': data_disk.get('managedDisk', {}).get('storageAccountType'),
-                'is_os_disk': False,
-                'lun': data_disk.get('lun')
-            })
-        
-        result = {
-            'vm': vm_data,
-            'nics': nics,
-            'disks': disks
-        }
-        
-        # Save the result to cache
-        save_to_cache(vm_name, resource_group, result)
-        
-        return result
-        
-    except Exception as e:
-        app.logger.error(f"Error getting VM details for {vm_name}: {str(e)}")
-        return None
-
-def get_storage_accounts():
-    """Get all storage accounts"""
-    try:
-        command = "az storage account list"
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            return json.loads(result.stdout)
-        return []
-    except Exception as e:
-        app.logger.error(f"Error getting storage accounts: {str(e)}")
-        return []
-
-def get_network_resources():
-    """Get network resources (VNets, Subnets, NSGs)"""
-    try:
-        resources = {
-            'vnets': [],
-            'public_ips': [],
-            'nsgs': []
-        }
-        
-        # Get VNets
-        vnet_command = "az network vnet list"
-        vnet_result = subprocess.run(vnet_command, shell=True, capture_output=True, text=True)
-        if vnet_result.returncode == 0:
-            resources['vnets'] = json.loads(vnet_result.stdout)
-        
-        # Get Public IPs
-        pip_command = "az network public-ip list"
-        pip_result = subprocess.run(pip_command, shell=True, capture_output=True, text=True)
-        if pip_result.returncode == 0:
-            resources['public_ips'] = json.loads(pip_result.stdout)
-        
-        # Get NSGs
-        nsg_command = "az network nsg list"
-        nsg_result = subprocess.run(nsg_command, shell=True, capture_output=True, text=True)
-        if nsg_result.returncode == 0:
-            resources['nsgs'] = json.loads(nsg_result.stdout)
-        
-        return resources
-    except Exception as e:
-        app.logger.error(f"Error getting network resources: {str(e)}")
-        return {'vnets': [], 'public_ips': [], 'nsgs': []}
-
-def calculate_vm_cost(vm_size, region="eastus"):
-    """Calculate estimated monthly cost for a VM"""
-    # Azure VM pricing (USD per hour) - This is a simplified version
-    # In production, you should use the Azure Retail Prices API
-    pricing = {
-        # B-series (burstable)
-        'Standard_B1s': 0.0208,
-        'Standard_B1ms': 0.0416,
-        'Standard_B2s': 0.0832,
-        'Standard_B2ms': 0.1664,
-        'Standard_B4ms': 0.3328,
-        'Standard_B8ms': 0.6656,
-        # D-series v4 (general purpose)
-        'Standard_D2_v4': 0.1008,
-        'Standard_D4_v4': 0.2016,
-        'Standard_D8_v4': 0.4032,
-        'Standard_D16_v4': 0.8064,
-        # E-series v4 (memory optimized)
-        'Standard_E2_v4': 0.1260,
-        'Standard_E4_v4': 0.2520,
-        'Standard_E8_v4': 0.5040,
-        'Standard_E16_v4': 1.0080,
-        # F-series v2 (compute optimized)
-        'Standard_F2s_v2': 0.0850,
-        'Standard_F4s_v2': 0.1700,
-        'Standard_F8s_v2': 0.3400,
-        'Standard_F16s_v2': 0.6800,
-        # Default fallback
-        'default': 0.1000
-    }
-    
-    # Get hourly cost
-    hourly_cost = pricing.get(vm_size, pricing['default'])
-    
-    # Calculate monthly cost (assuming 730 hours per month)
-    monthly_cost = hourly_cost * 730
-    
-    return monthly_cost
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -331,19 +70,135 @@ def index():
 def kpi():
     return render_template('kpi.html')
 
-@app.route('/storage')
-def storage():
-    return render_template('storage.html')
+@app.route('/api/vms')
+def get_vms():
+    """Get paginated list of VMs"""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        subscription = request.args.get('subscription', '')
+        
+        # Get list of VMs with minimal info
+        cmd = ['az', 'vm', 'list']
+        if subscription:
+            cmd.extend(['--subscription', subscription])
+        cmd.extend(['--query', '[].{name: name, resourceGroup: resourceGroup, location: location, powerState: powerState, vmSize: hardwareProfile.vmSize}'])
+        cmd.extend(['--output', 'json'])
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            app.logger.error(f"Failed to get VM list: {result.stderr}")
+            return jsonify({'error': 'Failed to get VM list', 'details': result.stderr}), 500
+            
+        vms = json.loads(result.stdout)
+        
+        # Calculate pagination
+        total = len(vms)
+        start_idx = (page - 1) * per_page
+        end_idx = min(start_idx + per_page, total)
+        current_page_vms = vms[start_idx:end_idx]
+        
+        return jsonify({
+            'vms': current_page_vms,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total + per_page - 1) // per_page
+        })
+        
+    except json.JSONDecodeError as e:
+        app.logger.error(f"JSON decode error: {str(e)}")
+        return jsonify({'error': 'Invalid JSON response from Azure CLI'}), 500
+    except Exception as e:
+        app.logger.error(f"Error getting VM list: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/network')
-def network():
-    return render_template('network.html')
+@app.route('/api/vms/batch')
+def get_vms_batch():
+    """Get batch of VM details"""
+    try:
+        vm_list = request.args.getlist('vms[]')  # Format: resourceGroup/vmName
+        if not vm_list:
+            return jsonify({'error': 'No VMs specified'}), 400
+            
+        batch_data = {}
+        
+        for vm_info in vm_list:
+            try:
+                resource_group, vm_name = vm_info.split('/')
+            except ValueError:
+                app.logger.error(f"Invalid VM info format: {vm_info}")
+                continue
+            
+            # Check cache first
+            cached_data = load_from_cache(vm_name, resource_group)
+            if cached_data:
+                batch_data[vm_info] = cached_data
+                continue
+                
+            try:
+                # Get basic VM info
+                cmd = ['az', 'vm', 'show', '--name', vm_name, '--resource-group', resource_group, 
+                      '--query', '{name: name, resourceGroup: resourceGroup, location: location, vmSize: hardwareProfile.vmSize, osType: storageProfile.osDisk.osType, powerState: powerState}', 
+                      '--output', 'json']
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    vm_data = json.loads(result.stdout)
+                    batch_data[vm_info] = {'vm': vm_data}
+                    
+                    # Get IP addresses
+                    ip_cmd = ['az', 'vm', 'list-ip-addresses', '--name', vm_name, '--resource-group', resource_group, '--output', 'json']
+                    ip_result = subprocess.run(ip_cmd, capture_output=True, text=True)
+                    
+                    if ip_result.returncode == 0:
+                        ip_data = json.loads(ip_result.stdout)
+                        if ip_data and len(ip_data) > 0:
+                            network = ip_data[0].get('virtualMachine', {}).get('network', {})
+                            batch_data[vm_info]['network'] = network
+                    
+                    # Cache the data
+                    save_to_cache(vm_name, resource_group, batch_data[vm_info])
+                else:
+                    app.logger.error(f"Failed to get VM details for {vm_info}: {result.stderr}")
+                    
+            except Exception as e:
+                app.logger.error(f"Error processing VM {vm_info}: {str(e)}")
+                continue
+            
+        return jsonify(batch_data)
+        
+    except Exception as e:
+        app.logger.error(f"Error getting VM batch: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/check-login')
+def check_login():
+    try:
+        cmd = "az account show"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            return jsonify({"status": "logged_in"})
+        else:
+            return jsonify({"status": "not_logged_in"})
+    except Exception as e:
+        app.logger.error(f"Error checking Azure login: {str(e)}")
+        return jsonify({"error": "Failed to check Azure login"}), 500
+
+@app.route('/api/refresh', methods=['POST'])
+def refresh_data():
+    try:
+        # Refresh cache
+        for file in os.listdir(CACHE_DIR):
+            os.remove(os.path.join(CACHE_DIR, file))
+        
+        return jsonify({"status": "complete"})
+    except Exception as e:
+        app.logger.error(f"Error refreshing data: {str(e)}")
+        return jsonify({"error": "Failed to refresh data"}), 500
 
 @app.route('/api/kpi-data')
 def get_kpi_data():
-    if not check_azure_login():
-        return jsonify({"error": "Not logged in to Azure"})
-    
     try:
         # Get instance data
         instances = get_azure_instances()
@@ -433,10 +288,9 @@ def get_kpi_data():
         
     except Exception as e:
         app.logger.error(f"Error generating KPI data: {str(e)}")
-        return jsonify({"error": "Failed to generate KPI data"})
+        return jsonify({"error": "Failed to generate KPI data"}), 500
 
 @app.route('/api/instances')
-@limiter.limit("30/minute")
 def get_instances():
     try:
         instances = get_azure_instances()
@@ -473,40 +327,65 @@ def get_instances():
         
     except Exception as e:
         app.logger.error(f"Error fetching instances: {str(e)}")
-        return jsonify({"error": "Failed to fetch instances"})
+        return jsonify({"error": "Failed to fetch instances"}), 500
 
 @app.route('/api/storage-data')
 def get_storage_data():
-    if not check_azure_login():
-        return jsonify({"error": "Not logged in to Azure"})
-    
     try:
-        storage_accounts = get_storage_accounts()
-        return jsonify({
-            "storage_accounts": storage_accounts
-        })
+        # Get storage accounts
+        cmd = "az storage account list"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            storage_accounts = json.loads(result.stdout)
+            return jsonify({
+                "storage_accounts": storage_accounts
+            })
+        else:
+            app.logger.error(f"Failed to get storage accounts: {result.stderr}")
+            return jsonify({"error": "Failed to get storage accounts"}), 500
     except Exception as e:
         app.logger.error(f"Error getting storage data: {str(e)}")
-        return jsonify({"error": "Failed to get storage data"})
+        return jsonify({"error": "Failed to get storage data"}), 500
 
 @app.route('/api/network-data')
 def get_network_data():
-    if not check_azure_login():
-        return jsonify({"error": "Not logged in to Azure"})
-    
     try:
-        network_resources = get_network_resources()
-        return jsonify(network_resources)
+        # Get network resources
+        cmd = "az network vnet list"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            vnets = json.loads(result.stdout)
+        else:
+            app.logger.error(f"Failed to get VNets: {result.stderr}")
+            return jsonify({"error": "Failed to get VNets"}), 500
+        
+        cmd = "az network public-ip list"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            public_ips = json.loads(result.stdout)
+        else:
+            app.logger.error(f"Failed to get public IPs: {result.stderr}")
+            return jsonify({"error": "Failed to get public IPs"}), 500
+        
+        cmd = "az network nsg list"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            nsgs = json.loads(result.stdout)
+        else:
+            app.logger.error(f"Failed to get NSGs: {result.stderr}")
+            return jsonify({"error": "Failed to get NSGs"}), 500
+        
+        return jsonify({
+            "vnets": vnets,
+            "public_ips": public_ips,
+            "nsgs": nsgs
+        })
     except Exception as e:
         app.logger.error(f"Error getting network data: {str(e)}")
-        return jsonify({"error": "Failed to get network data"})
+        return jsonify({"error": "Failed to get network data"}), 500
 
-@cache.memoize(timeout=CACHE_DURATION)
 def get_azure_instances():
     """Get Azure instances with detailed information"""
-    if not check_azure_login():
-        return {"error": "Not logged in to Azure"}
-    
     try:
         app.logger.info("Fetching Azure instances data...")
         
@@ -566,71 +445,27 @@ def get_azure_instances():
         app.logger.error(f"Error fetching instances: {str(e)}")
         return {"error": f"Failed to fetch instances: {str(e)}"}
 
-@app.route('/api/refresh', methods=['POST'])
-@limiter.limit("6/minute")
-def refresh_data():
-    cache.delete_memoized(get_azure_instances)
-    result = get_azure_instances()
-    if "error" in result:
-        return jsonify(result), 400
-    
-    refresh_time = humanize.naturaltime(last_refresh_time) if last_refresh_time else 'Never'
-    if "instances" in result:
-        return jsonify({
-            "status": "complete",
-            "instances": result["instances"],
-            "lastRefresh": refresh_time,
-            "totalCount": len(result["instances"])
-        })
-    return jsonify(result)
-
-@app.route('/api/vm-basic/<resource_group>/<vm_name>')
-def get_vm_basic_info(resource_group, vm_name):
-    """Get basic VM information quickly"""
+def get_vm_details(vm_name, resource_group):
+    """Get detailed VM information including NICs and disks"""
     try:
-        # Try cache first
+        # Try to get data from cache first
         cached_data = load_from_cache(vm_name, resource_group)
         if cached_data:
-            return jsonify(cached_data)
-
-        # Get basic VM info
-        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} -o json"
+            return cached_data
+        
+        app.logger.info(f"Getting details for VM {vm_name} in resource group {resource_group}")
+        
+        # Get VM details including IP addresses
+        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} --show-details -d"
         vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
         
         if vm_result.returncode != 0:
-            return jsonify({'error': 'Failed to get VM details'}), 500
+            app.logger.error(f"Failed to get VM details: {vm_result.stderr}")
+            return None
         
         vm_data = json.loads(vm_result.stdout)
         
-        # Return minimal info
-        basic_info = {
-            'vm': {
-                'name': vm_data.get('name'),
-                'resourceGroup': vm_data.get('resourceGroup'),
-                'location': vm_data.get('location'),
-                'vmSize': vm_data.get('hardwareProfile', {}).get('vmSize'),
-                'osType': vm_data.get('storageProfile', {}).get('osDisk', {}).get('osType'),
-                'provisioningState': vm_data.get('provisioningState')
-            },
-            'loading': True  # Indicate that more data is coming
-        }
-        
-        return jsonify(basic_info)
-        
-    except Exception as e:
-        app.logger.error(f"Error getting basic VM info: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/vm-network/<resource_group>/<vm_name>')
-def get_vm_network_info(resource_group, vm_name):
-    """Get VM network information separately"""
-    try:
-        # Check cache first
-        cached_data = load_from_cache(vm_name, resource_group)
-        if cached_data and 'nics' in cached_data:
-            return jsonify({'nics': cached_data['nics']})
-
-        # Get IP addresses
+        # Get IP addresses using the simpler command
         ip_command = f"az vm list-ip-addresses -n {vm_name} -g {resource_group} -o json"
         ip_result = subprocess.run(ip_command, shell=True, capture_output=True, text=True)
         
@@ -642,49 +477,56 @@ def get_vm_network_info(resource_group, vm_name):
                 private_ips = network.get('privateIpAddresses', [])
                 public_ips = network.get('publicIpAddresses', [])
                 
-                for i, private_ip in enumerate(private_ips):
-                    public_ip = public_ips[i].get('ipAddress') if i < len(public_ips) else 'Not configured'
-                    nics.append({
-                        'name': f'NIC {i+1}',
-                        'private_ip': private_ip,
-                        'public_ip': public_ip,
-                        'status': 'Configured'
-                    })
+                # Get NIC details for additional information
+                for i, ip_config in enumerate(vm_data.get('networkProfile', {}).get('networkInterfaces', [])):
+                    nic_id = ip_config.get('id', '')
+                    if not nic_id:
+                        continue
+                    
+                    nic_parts = nic_id.split('/')
+                    nic_name = nic_parts[-1]
+                    nic_resource_group = nic_parts[4] if len(nic_parts) > 4 else resource_group
+                    
+                    # Get NIC details for subnet information
+                    nic_command = f"az network nic show -n {nic_name} -g {nic_resource_group}"
+                    nic_result = subprocess.run(nic_command, shell=True, capture_output=True, text=True)
+                    
+                    if nic_result.returncode == 0:
+                        nic_data = json.loads(nic_result.stdout)
+                        ip_configs = nic_data.get('ipConfigurations', [])
+                        
+                        for i, ip_config in enumerate(ip_configs):
+                            subnet_id = ip_config.get('subnet', {}).get('id', '')
+                            subnet_parts = subnet_id.split('/') if subnet_id else []
+                            vnet_name = subnet_parts[-3] if len(subnet_parts) > 3 else 'Not configured'
+                            subnet_name = subnet_parts[-1] if subnet_parts else 'Not configured'
+                            
+                            private_ip = private_ips[i] if i < len(private_ips) else 'Not configured'
+                            public_ip = public_ips[i].get('ipAddress') if i < len(public_ips) else 'Not configured'
+                            
+                            nics.append({
+                                'name': nic_name,
+                                'private_ip': private_ip,
+                                'public_ip': public_ip,
+                                'subnet': subnet_name,
+                                'vnet': vnet_name,
+                                'status': 'Configured',
+                                'primary': ip_config.get('primary', False)
+                            })
         
+        # If no NICs were found through IP addresses, add a default entry
         if not nics:
             nics.append({
                 'name': 'Default NIC',
                 'private_ip': 'Not configured',
                 'public_ip': 'Not configured',
+                'subnet': 'Not configured',
+                'vnet': 'Not configured',
                 'status': 'No IP configuration'
             })
-            
-        return jsonify({'nics': nics})
         
-    except Exception as e:
-        app.logger.error(f"Error getting network info: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/vm-storage/<resource_group>/<vm_name>')
-def get_vm_storage_info(resource_group, vm_name):
-    """Get VM storage information separately"""
-    try:
-        # Check cache first
-        cached_data = load_from_cache(vm_name, resource_group)
-        if cached_data and 'disks' in cached_data:
-            return jsonify({'disks': cached_data['disks']})
-
-        # Get VM details for storage info
-        vm_command = f"az vm show --name {vm_name} --resource-group {resource_group} -o json"
-        vm_result = subprocess.run(vm_command, shell=True, capture_output=True, text=True)
-        
-        if vm_result.returncode != 0:
-            return jsonify({'error': 'Failed to get storage details'}), 500
-            
-        vm_data = json.loads(vm_result.stdout)
+        # Get disk details
         disks = []
-        
-        # Get OS disk
         os_disk = vm_data.get('storageProfile', {}).get('osDisk', {})
         if os_disk:
             disks.append({
@@ -694,7 +536,7 @@ def get_vm_storage_info(resource_group, vm_name):
                 'is_os_disk': True
             })
         
-        # Get data disks
+        # Add data disks
         for data_disk in vm_data.get('storageProfile', {}).get('dataDisks', []):
             disks.append({
                 'name': data_disk.get('name', 'Data Disk'),
@@ -703,101 +545,60 @@ def get_vm_storage_info(resource_group, vm_name):
                 'is_os_disk': False,
                 'lun': data_disk.get('lun')
             })
-            
-        return jsonify({'disks': disks})
+        
+        result = {
+            'vm': vm_data,
+            'nics': nics,
+            'disks': disks
+        }
+        
+        # Save the result to cache
+        save_to_cache(vm_name, resource_group, result)
+        
+        return result
         
     except Exception as e:
-        app.logger.error(f"Error getting storage info: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        app.logger.error(f"Error getting VM details for {vm_name}: {str(e)}")
+        return None
 
-@app.route('/api/vms')
-def get_vms():
-    """Get paginated list of VMs"""
-    try:
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 50, type=int)
-        subscription = request.args.get('subscription', '')
-        
-        # Get list of VMs with minimal info
-        cmd = ['az', 'vm', 'list']
-        if subscription:
-            cmd.extend(['--subscription', subscription])
-        cmd.extend(['--query', '[].{name: name, resourceGroup: resourceGroup, location: location, powerState: powerState, vmSize: hardwareProfile.vmSize}'])
-        cmd.extend(['--output', 'json'])
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            return jsonify({'error': 'Failed to get VM list'}), 500
-            
-        vms = json.loads(result.stdout)
-        
-        # Calculate pagination
-        total = len(vms)
-        start_idx = (page - 1) * per_page
-        end_idx = min(start_idx + per_page, total)
-        current_page_vms = vms[start_idx:end_idx]
-        
-        return jsonify({
-            'vms': current_page_vms,
-            'total': total,
-            'page': page,
-            'per_page': per_page,
-            'total_pages': (total + per_page - 1) // per_page
-        })
-        
-    except Exception as e:
-        app.logger.error(f"Error getting VM list: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/vms/batch')
-def get_vms_batch():
-    """Get batch of VM details"""
-    try:
-        vm_list = request.args.getlist('vms[]')  # Format: resourceGroup/vmName
-        batch_data = {}
-        
-        for vm_info in vm_list:
-            resource_group, vm_name = vm_info.split('/')
-            
-            # Check cache first
-            cached_data = load_from_cache(vm_name, resource_group)
-            if cached_data:
-                batch_data[vm_info] = cached_data
-                continue
-                
-            # Get basic VM info
-            cmd = ['az', 'vm', 'show', '--name', vm_name, '--resource-group', resource_group, '--show-details', '--query', '{name: name, resourceGroup: resourceGroup, location: location, vmSize: hardwareProfile.vmSize, osType: storageProfile.osDisk.osType, powerState: powerState}', '--output', 'json']
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                vm_data = json.loads(result.stdout)
-                batch_data[vm_info] = {'vm': vm_data}
-                
-                # Get IP addresses in background
-                ip_cmd = ['az', 'vm', 'list-ip-addresses', '--name', vm_name, '--resource-group', resource_group, '--output', 'json']
-                ip_result = subprocess.run(ip_cmd, capture_output=True, text=True)
-                
-                if ip_result.returncode == 0:
-                    ip_data = json.loads(ip_result.stdout)
-                    if ip_data and len(ip_data) > 0:
-                        network = ip_data[0].get('virtualMachine', {}).get('network', {})
-                        batch_data[vm_info]['network'] = network
-                
-                # Cache the data
-                save_to_cache(vm_name, resource_group, batch_data[vm_info])
-            
-        return jsonify(batch_data)
-        
-    except Exception as e:
-        app.logger.error(f"Error getting VM batch: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-def init_scheduler():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=lambda: cache.delete_memoized(get_azure_instances),
-                     trigger="interval", minutes=5)
-    scheduler.start()
+def calculate_vm_cost(vm_size, region="eastus"):
+    """Calculate estimated monthly cost for a VM"""
+    # Azure VM pricing (USD per hour) - This is a simplified version
+    # In production, you should use the Azure Retail Prices API
+    pricing = {
+        # B-series (burstable)
+        'Standard_B1s': 0.0208,
+        'Standard_B1ms': 0.0416,
+        'Standard_B2s': 0.0832,
+        'Standard_B2ms': 0.1664,
+        'Standard_B4ms': 0.3328,
+        'Standard_B8ms': 0.6656,
+        # D-series v4 (general purpose)
+        'Standard_D2_v4': 0.1008,
+        'Standard_D4_v4': 0.2016,
+        'Standard_D8_v4': 0.4032,
+        'Standard_D16_v4': 0.8064,
+        # E-series v4 (memory optimized)
+        'Standard_E2_v4': 0.1260,
+        'Standard_E4_v4': 0.2520,
+        'Standard_E8_v4': 0.5040,
+        'Standard_E16_v4': 1.0080,
+        # F-series v2 (compute optimized)
+        'Standard_F2s_v2': 0.0850,
+        'Standard_F4s_v2': 0.1700,
+        'Standard_F8s_v2': 0.3400,
+        'Standard_F16s_v2': 0.6800,
+        # Default fallback
+        'default': 0.1000
+    }
+    
+    # Get hourly cost
+    hourly_cost = pricing.get(vm_size, pricing['default'])
+    
+    # Calculate monthly cost (assuming 730 hours per month)
+    monthly_cost = hourly_cost * 730
+    
+    return monthly_cost
 
 if __name__ == '__main__':
-    init_scheduler()
-    app.run(debug=True, port=8080, host='0.0.0.0')
+    app.run(debug=True)

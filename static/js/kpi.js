@@ -156,20 +156,18 @@ function updateMetricsTable(data) {
 }
 
 function loadKPIData() {
-    startLoadingAnimation();
-    
-    $.get('/api/kpi-data')
-        .then(data => {
+    $.ajax({
+        url: '/get_kpi_data',
+        method: 'GET',
+        success: function(data) {
             initializeCharts(data);
             updateMetricsTable(data);
-        })
-        .catch(error => {
+        },
+        error: function(xhr, status, error) {
             console.error('Error loading KPI data:', error);
-            showToast('Failed to load KPI data', 'danger');
-        })
-        .finally(() => {
-            stopLoadingAnimation();
-        });
+            showError('Failed to load KPI data. Please try again later.');
+        }
+    });
 }
 
 // Initialize KPI page
